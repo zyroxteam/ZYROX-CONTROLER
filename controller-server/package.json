@@ -1,0 +1,23 @@
+{
+  "name": "zyrox-controler-server",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Telegram and MongoDB colour dice controller for ZYROX CONTROLER",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/models.js && node --check scripts/reset-controller-data.js",
+    "test": "node --test test/*.test.js",
+    "reset:controller": "node scripts/reset-controller-data.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "mongoose": "^8.9.5",
+    "telegraf": "^4.16.3"
+  }
+}

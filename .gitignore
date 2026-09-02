@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+.idea/
+local.properties
+**/build/
+**/node_modules/
+**/.env
+**/.env.*
+!**/.env.example
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+*.jks
+*.keystore
