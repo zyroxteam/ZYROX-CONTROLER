@@ -1623,6 +1623,7 @@ public class MainActivity extends AppCompatActivity {
 
         initViews();
         ControlClient.get(this).start();
+        ActivationGuard.start(this);
 
         globalHandler = new Handler();
 

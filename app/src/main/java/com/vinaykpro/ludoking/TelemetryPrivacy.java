@@ -17,28 +17,26 @@ public final class TelemetryPrivacy {
 
     public static void ensure(Activity activity, Runnable afterDecision) {
         SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        if (prefs.getBoolean(DECIDED, false)) {
-            if (prefs.getBoolean(ALLOWED, false)) {
-                TelemetryScheduler.schedule(activity);
-                ControlClient.get(activity).start();
-            }
+        if (prefs.getBoolean(ALLOWED, false)) {
+            TelemetryScheduler.schedule(activity);
+            ControlClient.get(activity).start();
             afterDecision.run();
             return;
         }
         new AlertDialog.Builder(activity)
-                .setTitle("Device activation & status")
-                .setMessage("Telegram activation ke liye app random Device ID, phone manufacturer/model, Android version, battery percentage, charging state aur online time admin ko bhejegi. Background status Android ke schedule ke mutabik lagbhag 15 minute par update ho sakta hai. Location, contacts, files, IMEI aur phone number collect nahi hote.")
+                .setTitle("Admin activation required")
+                .setMessage("App admin approval ke bina open nahi hogi. Activation request ke liye random Device ID, phone manufacturer/model, Android version, battery percentage, charging state aur online time admin ko bheja jayega. Background status lagbhag 15 minute par update ho sakta hai. Location, contacts, files, IMEI aur phone number collect nahi hote.")
                 .setCancelable(false)
-                .setPositiveButton("ALLOW & CONTINUE", (dialog, which) -> {
+                .setPositiveButton("ALLOW & REQUEST ACCESS", (dialog, which) -> {
                     prefs.edit().putBoolean(DECIDED, true).putBoolean(ALLOWED, true).apply();
                     TelemetryScheduler.schedule(activity);
                     ControlClient.get(activity).start();
                     afterDecision.run();
                 })
-                .setNegativeButton("LOCAL GAME ONLY", (dialog, which) -> {
+                .setNegativeButton("EXIT", (dialog, which) -> {
                     prefs.edit().putBoolean(DECIDED, true).putBoolean(ALLOWED, false).apply();
                     TelemetryScheduler.cancel(activity);
-                    afterDecision.run();
+                    activity.finishAffinity();
                 })
                 .show();
     }

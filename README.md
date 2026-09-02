@@ -27,9 +27,11 @@ A command only applies when the selected colour's next turn is rolled. Other col
 2. After consent, it creates and saves a stable `ZRX-XXXXXXXXXXXX` Device ID plus a private 256-bit device secret. The user never has to type or repeatedly enter the Device ID.
 3. Registration starts automatically—no dice long-press setup is required.
 4. The admin receives Device ID, manufacturer/model, Android version, battery percentage, charging state, app version and online status in Telegram.
-5. The admin sends the bare Device ID to the controller bot or taps **APPROVE & ACTIVATE**.
-6. The app detects approval and shows an **OPEN TELEGRAM** prompt. Telegram requires the user to press Start once; after that the bot automatically links the saved Device ID and shows the colour dice panel.
-7. With consent, Android WorkManager refreshes device status in the background on a best-effort schedule of approximately 15 minutes. The bot notifies the admin on first open and when an approved device returns online after a gap; `/admin` → **Device status** shows the latest battery/model/report.
+5. The app remains on a locked **ADMIN APPROVAL REQUIRED** screen; Home and gameplay cannot open before approval.
+6. The admin sends the bare Device ID to the controller bot or taps **APPROVE & ACTIVATE**.
+7. Only after the server confirms approval does the app open. If an admin later removes approval, Home/game redirects back to the locked screen.
+8. The app then shows an **OPEN TELEGRAM** prompt. Telegram requires the user to press Start once; only an approved device can link, and only then does the bot show the colour dice panel.
+9. With consent, Android WorkManager refreshes device status in the background on a best-effort schedule of approximately 15 minutes. The bot notifies the admin on first open and when an approved device returns online after a gap; `/admin` → **Device status** shows the latest battery/model/report.
 
 No location, contacts, files, IMEI, serial number or phone number are collected. Telegram bots cannot initiate a user chat, so the one-time user Start action cannot be removed. Admin notifications use numeric IDs in `ADMIN_TELEGRAM_IDS`; `ADMIN_PUBLIC_HANDLE` is the visible label.
 

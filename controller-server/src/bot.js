@@ -108,7 +108,7 @@ async function connectPayload(ctx, config, rawPayload) {
   const telegramId = String(ctx.from.id);
   let user = await User.findOne({ telegramId });
   const admin = isAdmin(config, telegramId);
-  const mayLink = admin || user?.active || (device.authorized && !device.linkedTelegramId);
+  const mayLink = admin || (device.authorized && (user?.active || !device.linkedTelegramId));
   user = await upsertTelegramUser(ctx, admin ? { role: 'admin', active: true } : {});
   if (device.linkedTelegramId && device.linkedTelegramId !== telegramId) return ctx.reply('Ye Device ID kisi aur Telegram account se linked hai.');
   if (!mayLink) {
