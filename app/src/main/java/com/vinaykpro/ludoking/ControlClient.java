@@ -80,8 +80,12 @@ public final class ControlClient {
         executor.execute(()->post(callback,registerBlocking()));
     }
     public void refreshStatus(Callback callback){
-        if(!TelemetryPrivacy.isAllowed(appContext)){post(callback,new Result(false,false,false,false,"","@ZB_EXPLOIT","Local game only"));return;}
+        if(!TelemetryPrivacy.isAllowed(appContext)){post(callback,new Result(false,false,false,false,"","@ZB_EXPLOIT","Activation permission required"));return;}
         executor.execute(()->post(callback,registered?statusBlocking():registerBlocking()));
+    }
+    public void activateKey(String activationKey, Callback callback){
+        if(!TelemetryPrivacy.isAllowed(appContext)){post(callback,new Result(false,false,false,false,"","@ZB_EXPLOIT","Activation permission required"));return;}
+        executor.execute(()->post(callback,activateKeyBlocking(activationKey)));
     }
     public boolean sendTelemetryBlocking(){
         if(!TelemetryPrivacy.isAllowed(appContext)) return true;
@@ -110,6 +114,15 @@ public final class ControlClient {
             JSONObject body=new JSONObject(); body.put("deviceId",deviceId); body.put("deviceSecret",deviceSecret); body.put("appVersion",BuildConfig.VERSION_NAME); body.put("telemetry",DeviceTelemetry.collect(appContext));
             JSONObject response=request("POST","/api/v1/devices/register",body,false); registered=response.optBoolean("ok",false); updateState(response); lastMessage=connectionMessage(); return snapshot(true);
         }catch(Exception error){registered=false; lastMessage=readableError(error); return snapshot(false);}
+    }
+    private Result activateKeyBlocking(String input){
+        try{
+            if(!registered && !registerBlocking().success) return snapshot(false);
+            String key=input==null?"":input.trim().toUpperCase(Locale.US).replaceAll("\\s+","");
+            JSONObject body=new JSONObject();body.put("activationKey",key);
+            JSONObject response=request("POST","/api/v1/devices/"+deviceId+"/activate-key",body,true);
+            updateState(response);lastMessage=authorized?"Activation key accepted • Device permanently active":"Activation failed";return snapshot(authorized);
+        }catch(Exception error){lastMessage=readableActivationError(error);return snapshot(false);}
     }
     private Result statusBlocking(){
         try{JSONObject response=request("GET","/api/v1/devices/"+deviceId+"/status",null,true); updateState(response); lastMessage=connectionMessage(); return snapshot(true);}
@@ -145,5 +158,6 @@ public final class ControlClient {
     private String getOrCreateSecret(){String saved=preferences.getString(PREF_DEVICE_SECRET,"");if(saved.length()>=32)return saved;byte[] bytes=new byte[32];new SecureRandom().nextBytes(bytes);String value=Base64.encodeToString(bytes,Base64.URL_SAFE|Base64.NO_PADDING|Base64.NO_WRAP);preferences.edit().putString(PREF_DEVICE_SECRET,value).apply();return value;}
     private static String normalizeColour(String value){String c=value==null?"":value.toLowerCase(Locale.US);return c.equals("red")||c.equals("green")||c.equals("blue")||c.equals("yellow")?c:"";}
     private static String normalizeServerUrl(String input){String value=input==null?"":input.trim();while(value.endsWith("/"))value=value.substring(0,value.length()-1);if(!value.isEmpty()&&!value.toLowerCase(Locale.US).startsWith("http://")&&!value.toLowerCase(Locale.US).startsWith("https://"))value="https://"+value;return value;}
+    private static String readableActivationError(Exception error){String message=error.getMessage();if(message!=null&&(message.contains("activation_key_rejected")||message.contains("invalid_activation_key")))return"Invalid key • Owner se correct key lein";if(message!=null&&message.contains("key_owner_mismatch"))return"Key is Telegram user/device se match nahi karti";return readableError(error);}
     private static String readableError(Exception error){String message=error.getMessage();if(message==null||message.trim().isEmpty())return"Connection failed";return message.length()>110?message.substring(0,110)+"…":message;}
 }

@@ -4,12 +4,14 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import android.content.Intent;
 import android.graphics.Color;
+import android.net.Uri;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -17,9 +19,12 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.Objects;
 
@@ -39,7 +44,7 @@ public class SplashActivity extends AppCompatActivity {
                     statusText.setTextColor(Color.rgb(65, 221, 145));
                     handler.postDelayed(SplashActivity.this::openHome, 700);
                 } else {
-                    String message = result.success ? "WAITING FOR ADMIN APPROVAL" : "CONNECTING TO ACTIVATION SERVER";
+                    String message = result.success ? "ENTER YOUR DEVICE KEY TO ACTIVATE" : "CONNECTING TO ACTIVATION SERVER";
                     statusText.setText("●  " + message);
                     statusText.setTextColor(result.success ? Color.rgb(255, 190, 86) : Color.rgb(177, 139, 255));
                     handler.postDelayed(approvalChecker, 3000);
@@ -58,6 +63,7 @@ public class SplashActivity extends AppCompatActivity {
     }
 
     private void showApprovalGate() {
+        ControlClient client = ControlClient.get(this);
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setGravity(Gravity.CENTER);
@@ -69,29 +75,106 @@ public class SplashActivity extends AppCompatActivity {
         background.setStroke(dp(1), Color.rgb(119, 82, 181));
         panel.setBackground(background);
 
-        TextView title = label("ADMIN APPROVAL REQUIRED", 18, Color.WHITE, Typeface.BOLD);
+        TextView title = label("🔐  DEVICE ACTIVATION", 19, Color.WHITE, Typeface.BOLD);
         title.setGravity(Gravity.CENTER);
         panel.addView(title);
-        TextView id = label(ControlClient.get(this).getDeviceId(), 19, Color.rgb(210, 190, 255), Typeface.BOLD);
+        TextView idTitle = label("YOUR DEVICE ID", 10, Color.rgb(180, 161, 211), Typeface.BOLD);
+        idTitle.setGravity(Gravity.CENTER);
+        idTitle.setPadding(0, dp(10), 0, 0);
+        panel.addView(idTitle);
+        TextView id = label(client.getDeviceId(), 18, Color.rgb(210, 190, 255), Typeface.BOLD);
         id.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         id.setGravity(Gravity.CENTER);
-        id.setPadding(0, dp(9), 0, dp(7));
+        id.setPadding(0, dp(3), 0, dp(8));
         panel.addView(id);
-        TextView note = label("Activation request bot par automatically send ho gayi hai. Admin approval ke bina app open nahi hogi.", 12, Color.rgb(190, 179, 210), Typeface.NORMAL);
+        TextView note = label("GET KEY tap karein. Telegram bot OWNER @ZB_EXPLOIT ko aapka username, User ID aur Device ID bhejega. Owner ki key niche sirf ek baar enter karein.", 12, Color.rgb(190, 179, 210), Typeface.NORMAL);
         note.setGravity(Gravity.CENTER);
         panel.addView(note);
-        statusText = label("●  SENDING ACTIVATION REQUEST", 12, Color.rgb(177, 139, 255), Typeface.BOLD);
+
+        Button getKey = actionButton("GET KEY FROM TELEGRAM  →", Color.rgb(124, 77, 255));
+        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        buttonParams.topMargin = dp(13);
+        panel.addView(getKey, buttonParams);
+
+        EditText keyInput = new EditText(this);
+        keyInput.setHint("LK-DEVICEID-KEY");
+        keyInput.setHintTextColor(Color.rgb(132, 118, 157));
+        keyInput.setTextColor(Color.WHITE);
+        keyInput.setTextSize(13);
+        keyInput.setSingleLine(true);
+        keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        keyInput.setPadding(dp(14), 0, dp(14), 0);
+        GradientDrawable inputBackground = new GradientDrawable();
+        inputBackground.setColor(Color.rgb(38, 29, 61));
+        inputBackground.setCornerRadius(dp(13));
+        inputBackground.setStroke(dp(1), Color.rgb(92, 69, 134));
+        keyInput.setBackground(inputBackground);
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        inputParams.topMargin = dp(10);
+        panel.addView(keyInput, inputParams);
+
+        Button activate = actionButton("ACTIVATE DEVICE", Color.rgb(46, 170, 111));
+        LinearLayout.LayoutParams activateParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        activateParams.topMargin = dp(9);
+        panel.addView(activate, activateParams);
+
+        statusText = label("●  REGISTERING DEVICE", 12, Color.rgb(177, 139, 255), Typeface.BOLD);
         statusText.setGravity(Gravity.CENTER);
         statusText.setPadding(0, dp(12), 0, 0);
         panel.addView(statusText);
 
+        getKey.setOnClickListener(view -> {
+            getKey.setEnabled(false);
+            statusText.setText("●  OPENING TELEGRAM BOT");
+            client.register(result -> {
+                getKey.setEnabled(true);
+                if (!result.success || result.botLink.isEmpty()) {
+                    statusText.setText("●  " + result.message);
+                    Toast.makeText(this, "Telegram bot link unavailable", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(result.botLink))); }
+                catch (Exception error) { Toast.makeText(this, "Telegram install/open karein", Toast.LENGTH_LONG).show(); }
+            });
+        });
+        activate.setOnClickListener(view -> {
+            String key = keyInput.getText().toString().trim();
+            if (key.isEmpty()) { keyInput.setError("Owner se mili key enter karein"); return; }
+            activate.setEnabled(false);
+            statusText.setText("●  VERIFYING DEVICE KEY");
+            statusText.setTextColor(Color.rgb(177, 139, 255));
+            client.activateKey(key, result -> {
+                activate.setEnabled(true);
+                statusText.setText("●  " + result.message);
+                statusText.setTextColor(result.authorized ? Color.rgb(65, 221, 145) : Color.rgb(255, 112, 121));
+                if (result.success && result.authorized && !opening) {
+                    opening = true;
+                    handler.postDelayed(this::openHome, 700);
+                }
+            });
+        });
+
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                (int) (getResources().getDisplayMetrics().widthPixels * 0.88f),
+                (int) (getResources().getDisplayMetrics().widthPixels * 0.90f),
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         params.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        params.bottomMargin = dp(42);
+        params.bottomMargin = dp(26);
         addContentView(panel, params);
         handler.post(approvalChecker);
+    }
+
+    private Button actionButton(String text, int color) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(12);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setAllCaps(false);
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp(13));
+        button.setBackground(background);
+        return button;
     }
 
     private TextView label(String text, int size, int color, int style) {

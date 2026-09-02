@@ -1,6 +1,6 @@
 const { Telegraf, Markup } = require('telegraf');
 const { User, Device, Command, Setting, Audit } = require('./models');
-const { isValidDeviceId, normalizeDeviceId, userLabel, isValidColour } = require('./utils');
+const { isValidDeviceId, normalizeDeviceId, userLabel, isValidColour, generateActivationKey, hashSecret } = require('./utils');
 
 const pendingAdminInput = new Map();
 const COLOUR_META = {
@@ -31,6 +31,7 @@ function diceKeyboard(selectedColour) {
 }
 
 function isAdmin(config, telegramId) { return config.adminIds.includes(String(telegramId)); }
+function approvalRecipients(config) { return config.ownerChatId ? [String(config.ownerChatId)] : []; }
 function ageLabel(date) {
   if (!date) return 'never';
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 1000));
@@ -87,59 +88,110 @@ async function showDicePanel(ctx, config) {
   ].join('\n'), diceKeyboard(colour));
 }
 
-async function activateDevice(config, actorTelegramId, deviceId) {
-  const device = await Device.findOne({ deviceId });
-  if (!device) return { ok: false, message: 'Device registered nahi hai. App ko internet ke saath open karwao.' };
-  device.authorized = true;
-  await device.save();
-  await audit(actorTelegramId, 'device_activated', deviceId);
-  return { ok: true, message: `✅ Device activated: ${deviceId}\nAb user app se Connect Telegram karke /panel open kar sakta hai.` };
+async function activateDevice(_config, _actorTelegramId, _deviceId) {
+  return { ok: false, message: 'Direct activation disabled. Device-bound activation key required.' };
+}
+
+async function claimOwner(ctx, config) {
+  const expected = String(config.ownerUsername || '').replace(/^@/, '').toLowerCase();
+  const actual = String(ctx.from?.username || '').toLowerCase();
+  if (!actual || actual !== expected) {
+    await ctx.reply(`Owner setup denied. Ye link sirf @${config.ownerUsername} account ke liye hai.`);
+    return false;
+  }
+  const telegramId = String(ctx.from.id);
+  const existing = await Setting.findOne({ key: 'owner_chat_id' }).lean();
+  if (existing?.value && String(existing.value) !== telegramId) {
+    await ctx.reply('Owner pehle hi kisi doosre Telegram account se securely linked hai.');
+    return false;
+  }
+  await Setting.findOneAndUpdate({ key: 'owner_chat_id' }, { value: telegramId }, { upsert: true });
+  config.ownerChatId = telegramId;
+  if (!config.adminIds.includes(telegramId)) config.adminIds.unshift(telegramId);
+  await upsertTelegramUser(ctx, { role: 'admin', active: true });
+  await ctx.reply(`✅ OWNER CONNECTED\n@${config.ownerUsername}\n\nAb first-open Device ID approval messages direct isi chat mein aayenge.`, adminKeyboard());
+
+  const pendingDevices = await Device.find({ authorized: false, keyIssuedToTelegramId: { $ne: '' } }).sort({ keyRequestedAt: -1 }).limit(20).lean();
+  for (const device of pendingDevices) {
+    const phone = [device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown model';
+    const battery = device.batteryLevel >= 0 ? `${device.batteryLevel}%${device.charging ? ' ⚡' : ''}` : 'unknown';
+    const username = device.keyIssuedToUsername ? `@${device.keyIssuedToUsername}` : 'No username';
+    await ctx.telegram.sendMessage(telegramId, `🔐 PENDING KEY REQUEST\n\nUser: ${device.keyIssuedToName || '-'} (${username})\nTelegram ID: ${device.keyIssuedToTelegramId}\nDevice ID: ${device.deviceId}\nPhone: ${phone}\nBattery: ${battery}\nStatus: 🟢 Online`, Markup.inlineKeyboard([[
+      Markup.button.callback('🔑 GENERATE KEY', `keygen:${device.keyIssuedToTelegramId}:${device.deviceId}`),
+      Markup.button.callback('❌ REJECT', `keyreject:${device.keyIssuedToTelegramId}:${device.deviceId}`),
+    ]])).catch(() => null);
+  }
+  return true;
 }
 
 async function connectPayload(ctx, config, rawPayload) {
   const deviceId = normalizeDeviceId(rawPayload);
   if (!isValidDeviceId(deviceId)) {
-    await ctx.reply(`Welcome to ZYROX CONTROLER.\nYour Telegram user ID: ${ctx.from.id}\nApp mein dice long-press karke Connect Telegram karein.`);
+    await ctx.reply(`Welcome to ZYROX CONTROLER.\nYour Telegram user ID: ${ctx.from.id}\nApp ke GET KEY button se bot open karein.`);
     if (await User.exists({ telegramId: String(ctx.from.id), active: true })) await showDicePanel(ctx, config);
     return;
   }
   const device = await Device.findOne({ deviceId });
-  if (!device) return ctx.reply('Device registered nahi hai. App open karke dobara try karein.');
+  if (!device) return ctx.reply('Device registered nahi hai. App open karke GET KEY dobara tap karein.');
   const telegramId = String(ctx.from.id);
-  let user = await User.findOne({ telegramId });
   const admin = isAdmin(config, telegramId);
-  const mayLink = admin || (device.authorized && (user?.active || !device.linkedTelegramId));
-  user = await upsertTelegramUser(ctx, admin ? { role: 'admin', active: true } : {});
-  if (device.linkedTelegramId && device.linkedTelegramId !== telegramId) return ctx.reply('Ye Device ID kisi aur Telegram account se linked hai.');
-  if (!mayLink) {
-    await ctx.reply(`⏳ Request admin ${config.adminPublicHandle} ko send ho gayi.\nDevice: ${deviceId}\nTelegram ID: ${telegramId}`);
-    for (const adminId of config.adminIds) {
-      await ctx.telegram.sendMessage(adminId, `🔔 ACCESS REQUEST\nUser: ${user.firstName}\nTelegram ID: ${telegramId}\nDevice: ${deviceId}`, Markup.inlineKeyboard([[
-        Markup.button.callback('✅ Approve', `approve:${telegramId}:${deviceId}`),
-        Markup.button.callback('❌ Reject', `reject:${telegramId}:${deviceId}`),
-      ]])).catch(() => null);
-    }
-    return audit(telegramId, 'access_requested', deviceId);
+  const user = await upsertTelegramUser(ctx, admin ? { role: 'admin', active: true } : {});
+
+  if (device.authorized && device.linkedTelegramId === telegramId) {
+    user.active = true;
+    user.deviceIds = [...new Set([...(user.deviceIds || []), deviceId])];
+    user.selectedDeviceId = deviceId;
+    await user.save();
+    await ctx.reply(`✅ Device active: ${deviceId}`);
+    return showDicePanel(ctx, config);
   }
-  device.authorized = true;
+  if (device.authorized && device.linkedTelegramId && device.linkedTelegramId !== telegramId && !admin) {
+    return ctx.reply('Ye activated device kisi aur Telegram account se linked hai.');
+  }
+
+  device.authorized = false;
+  if (device.keyIssuedToTelegramId && device.keyIssuedToTelegramId !== telegramId) {
+    device.activationKeyHash = '';
+    device.activationKeyPreview = '';
+    device.keyCreatedAt = null;
+    device.keyActivatedAt = null;
+  }
   device.linkedTelegramId = telegramId;
+  device.keyIssuedToTelegramId = telegramId;
+  device.keyIssuedToUsername = ctx.from.username || '';
+  device.keyIssuedToName = user.firstName || userLabel(ctx.from);
+  device.keyRequestedAt = new Date();
   await device.save();
-  user.active = true;
-  user.deviceIds = [...new Set([...(user.deviceIds || []), deviceId])];
-  user.selectedDeviceId = deviceId;
-  await user.save();
-  await audit(telegramId, 'device_linked', deviceId);
-  await ctx.reply(`✅ Connected: ${deviceId}`);
-  return showDicePanel(ctx, config);
+  const username = ctx.from.username ? `@${ctx.from.username}` : 'No username';
+  const phone = [device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown model';
+  const battery = device.batteryLevel >= 0 ? `${device.batteryLevel}%${device.charging ? ' ⚡' : ''}` : 'unknown';
+
+  let sent = 0;
+  for (const adminId of approvalRecipients(config)) {
+    try {
+      await ctx.telegram.sendMessage(adminId, `🔐 ACTIVATION KEY REQUEST\n\nUser: ${user.firstName || '-'} (${username})\nTelegram ID: ${telegramId}\nDevice ID: ${deviceId}\nPhone: ${phone}\nBattery: ${battery}\n\nOwner key generate karke is device ko activate kar sakta hai.`, Markup.inlineKeyboard([[
+        Markup.button.callback('🔑 GENERATE KEY', `keygen:${telegramId}:${deviceId}`),
+        Markup.button.callback('❌ REJECT', `keyreject:${telegramId}:${deviceId}`),
+      ]]));
+      sent += 1;
+    } catch (_) { /* owner must start the bot once */ }
+  }
+  await audit(telegramId, 'activation_key_requested', deviceId, { username: ctx.from.username || '' });
+  return ctx.reply(sent
+    ? `✅ Key request ${config.adminPublicHandle} OWNER ko send ho gayi.\n\nDevice: ${deviceId}\nOwner key generate karega; key yahin bot chat mein milegi. App mein key sirf ek baar enter karein.`
+    : `⚠️ Request saved hai, lekin OWNER ne bot start nahi kiya. Key ke liye ${config.adminPublicHandle} ko message karein.\nDevice: ${deviceId}`);
 }
 
 function createBot(config) {
   const bot = new Telegraf(config.botToken);
 
   bot.start(async (ctx) => {
-    try { await connectPayload(ctx, config, ctx.startPayload || ''); }
-    catch (error) { console.error('start handler:', error); await ctx.reply('Temporary server error.'); }
+    try {
+      if (String(ctx.startPayload || '').toLowerCase() === 'owner') await claimOwner(ctx, config);
+      else await connectPayload(ctx, config, ctx.startPayload || '');
+    } catch (error) { console.error('start handler:', error); await ctx.reply('Temporary server error.'); }
   });
+  bot.command('owner', (ctx) => claimOwner(ctx, config));
   bot.command('id', (ctx) => ctx.reply(`Your Telegram user ID: ${ctx.from.id}`));
   bot.command('panel', (ctx) => showDicePanel(ctx, config));
   bot.command('admin', async (ctx) => {
@@ -189,10 +241,62 @@ function createBot(config) {
     if (!isAdmin(config, ctx.from?.id)) { await ctx.answerCbQuery('Admin access denied', { show_alert: true }); return false; }
     await ctx.answerCbQuery(); return true;
   }
+  bot.action(/^keygen:(\d+):(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const [, telegramId, deviceId] = ctx.match;
+    const device = await Device.findOne({ deviceId });
+    if (!device) return ctx.reply('Device not found.', adminKeyboard());
+    if (device.keyIssuedToTelegramId && device.keyIssuedToTelegramId !== telegramId) return ctx.reply('Request user mismatch. User ko GET KEY dobara tap karwayein.', adminKeyboard());
+    const activationKey = generateActivationKey(deviceId);
+    device.authorized = false;
+    device.linkedTelegramId = telegramId;
+    device.activationKeyHash = hashSecret(activationKey);
+    device.activationKeyPreview = `••••${activationKey.slice(-6)}`;
+    device.keyIssuedToTelegramId = telegramId;
+    device.keyCreatedAt = new Date();
+    device.keyActivatedAt = null;
+    device.keyRevokedAt = null;
+    await device.save();
+    await audit(ctx.from.id, 'activation_key_generated', deviceId, { telegramId, preview: device.activationKeyPreview });
+    const keyMessage = `🔐 DEVICE ACTIVATION KEY\n\n${activationKey}\n\nDevice ID: ${deviceId}\nYe key sirf isi device ke liye hai. App ke popup mein ek baar paste karke ACTIVATE tap karein.`;
+    const delivered = await ctx.telegram.sendMessage(telegramId, keyMessage).then(() => true).catch(() => false);
+    return ctx.reply(`✅ KEY GENERATED\n\nUser: ${device.keyIssuedToName || '-'}${device.keyIssuedToUsername ? ` (@${device.keyIssuedToUsername})` : ''}\nTelegram ID: ${telegramId}\nDevice ID: ${deviceId}\nKey: ${activationKey}\n\nUser delivery: ${delivered ? '✅ Sent' : '⚠️ Failed — owner manually share kare'}`, Markup.inlineKeyboard([[
+      Markup.button.callback('🗑 DELETE KEY', `keydelete:${deviceId}`),
+    ]]));
+  });
+  bot.action(/^keyreject:(\d+):(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const [, telegramId, deviceId] = ctx.match;
+    const device = await Device.findOne({ deviceId });
+    if (device) {
+      device.authorized = false; device.linkedTelegramId = '';
+      device.activationKeyHash = ''; device.activationKeyPreview = '';
+      device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
+      await device.save();
+    }
+    await audit(ctx.from.id, 'activation_key_rejected', deviceId, { telegramId });
+    await ctx.telegram.sendMessage(telegramId, `❌ ${deviceId} activation key request rejected by owner.`).catch(() => null);
+    return ctx.reply(`Rejected ${telegramId} → ${deviceId}`, adminKeyboard());
+  });
+  bot.action(/^keydelete:(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const deviceId = ctx.match[1];
+    const device = await Device.findOne({ deviceId });
+    if (!device) return ctx.reply('Device not found.', adminKeyboard());
+    const oldTelegramId = device.linkedTelegramId || device.keyIssuedToTelegramId;
+    device.authorized = false; device.linkedTelegramId = '';
+    device.activationKeyHash = ''; device.activationKeyPreview = '';
+    device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
+    await device.save();
+    await Command.deleteMany({ deviceId });
+    if (oldTelegramId) await User.updateOne({ telegramId: oldTelegramId }, { $pull: { deviceIds: deviceId }, $set: { selectedDeviceId: '' } });
+    await audit(ctx.from.id, 'activation_key_deleted', deviceId, { telegramId: oldTelegramId });
+    if (oldTelegramId) await ctx.telegram.sendMessage(oldTelegramId, `🔒 ${deviceId} activation key owner ne delete kar di. App dobara lock ho gayi.`).catch(() => null);
+    return ctx.reply(`🗑 Key deleted and device locked: ${deviceId}`, adminKeyboard());
+  });
   bot.action(/^activate:(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
     if (!(await adminOnly(ctx))) return;
-    const result = await activateDevice(config, ctx.from.id, ctx.match[1]);
-    return ctx.reply(result.message, adminKeyboard());
+    return ctx.reply('Old approval flow disabled. User ko app mein GET KEY tap karwayein.', adminKeyboard());
   });
   bot.action('admin:status', async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -214,9 +318,12 @@ function createBot(config) {
       const battery = d.batteryLevel >= 0 ? `${d.batteryLevel}%${d.charging ? ' ⚡' : ''}` : 'unknown';
       const phone = [d.manufacturer, d.model].filter(Boolean).join(' ') || 'Unknown model';
       const state = d.authorized ? '✅' : '⏳';
-      return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${d.linkedTelegramId ? `User ${d.linkedTelegramId}` : 'Not linked'} • ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
+      const identity = d.keyIssuedToTelegramId ? `${d.keyIssuedToName || 'User'}${d.keyIssuedToUsername ? ` (@${d.keyIssuedToUsername})` : ''} • ID ${d.keyIssuedToTelegramId}` : 'No key requester';
+      const key = d.activationKeyHash ? `🔐 ${d.activationKeyPreview || 'Key issued'}` : '🔒 No key';
+      return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${identity}\n   ${key} • ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
     });
-    return ctx.reply(`📱 DEVICE STATUS (${devices.length})\n\n${lines.join('\n\n') || 'No devices'}`, adminKeyboard());
+    const keyRows = devices.filter((d) => d.activationKeyHash).map((d) => [Markup.button.callback(`🗑 Delete key • ${d.deviceId}`, `keydelete:${d.deviceId}`)]);
+    return ctx.reply(`📱 DEVICE STATUS (${devices.length})\n\n${lines.join('\n\n') || 'No devices'}`, keyRows.length ? Markup.inlineKeyboard([...keyRows, [Markup.button.callback('↩️ Admin panel', 'admin:status')]]) : adminKeyboard());
   });
   bot.action('admin:maintenance', async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -244,13 +351,7 @@ function createBot(config) {
   });
   bot.action(/^approve:(\d+):(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
     if (!(await adminOnly(ctx))) return;
-    const [, telegramId, deviceId] = ctx.match;
-    const device = await Device.findOne({ deviceId }); if (!device) return ctx.reply('Device not found.');
-    device.authorized = true; device.linkedTelegramId = telegramId; await device.save();
-    await User.findOneAndUpdate({ telegramId }, { $set: { active: true, selectedDeviceId: deviceId }, $addToSet: { deviceIds: deviceId } }, { upsert: true });
-    await audit(ctx.from.id, 'access_approved', deviceId, { telegramId });
-    await ctx.telegram.sendMessage(telegramId, `✅ ${deviceId} approved. /panel send karein.`).catch(() => null);
-    return ctx.reply(`Approved ${telegramId} → ${deviceId}`, adminKeyboard());
+    return ctx.reply('Old approval flow disabled. User ko app mein GET KEY tap karwayein.', adminKeyboard());
   });
   bot.action(/^reject:(\d+):(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -266,8 +367,7 @@ function createBot(config) {
     const text = ctx.message.text.trim();
     const state = pendingAdminInput.get(telegramId);
     if (!state && isAdmin(config, telegramId) && isValidDeviceId(text)) {
-      const result = await activateDevice(config, telegramId, normalizeDeviceId(text));
-      return ctx.reply(result.message, adminKeyboard());
+      return ctx.reply('Security key flow enabled. User ko app mein GET KEY tap karwayein; phir GENERATE KEY button yahan aayega.', adminKeyboard());
     }
     if (!state || !isAdmin(config, telegramId)) return;
     pendingAdminInput.delete(telegramId);
@@ -277,16 +377,7 @@ function createBot(config) {
       await audit(telegramId, 'broadcast_sent', '', { sent, failed }); return ctx.reply(`Sent: ${sent}, failed: ${failed}`, adminKeyboard());
     }
     if (state.action === 'add') {
-      const parts = text.toUpperCase().split(/\s+/); const userId = parts.find((p) => /^\d+$/.test(p)); const deviceId = parts.find(isValidDeviceId);
-      if (!userId && !deviceId) return ctx.reply('Invalid input.', adminKeyboard());
-      if (deviceId) {
-        const device = await Device.findOne({ deviceId }); if (!device) return ctx.reply('Device registered nahi hai.', adminKeyboard());
-        if (device.linkedTelegramId && userId && device.linkedTelegramId !== userId) return ctx.reply('Device kisi aur user se linked hai.', adminKeyboard());
-        device.authorized = true; if (userId) device.linkedTelegramId = userId; await device.save();
-      }
-      if (userId) await User.findOneAndUpdate({ telegramId: userId }, { $set: { active: true, ...(deviceId ? { selectedDeviceId: deviceId } : {}) }, ...(deviceId ? { $addToSet: { deviceIds: deviceId } } : {}) }, { upsert: true });
-      await audit(telegramId, 'user_or_device_added', deviceId || userId, { userId, deviceId });
-      return ctx.reply(`✅ Added${userId?` user ${userId}`:''}${deviceId?` device ${deviceId}`:''}`, adminKeyboard());
+      return ctx.reply('Direct add disabled. Device-bound key ke liye user app mein GET KEY tap kare; phir owner GENERATE KEY button use kare.', adminKeyboard());
     }
     if (state.action === 'remove') {
       const value = text.toUpperCase();
