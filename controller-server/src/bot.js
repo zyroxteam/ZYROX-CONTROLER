@@ -31,7 +31,10 @@ function diceKeyboard(selectedColour) {
 }
 
 function isAdmin(config, telegramId) { return config.adminIds.includes(String(telegramId)); }
-function approvalRecipients(config) { return config.ownerChatId ? [String(config.ownerChatId)] : []; }
+function approvalRecipients(config) {
+  const recipients = [...(config.ownerChatId ? [String(config.ownerChatId)] : []), ...config.adminIds.map(String)];
+  return [...new Set(recipients)];
+}
 function ageLabel(date) {
   if (!date) return 'never';
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 1000));
@@ -95,13 +98,14 @@ async function activateDevice(_config, _actorTelegramId, _deviceId) {
 async function claimOwner(ctx, config) {
   const expected = String(config.ownerUsername || '').replace(/^@/, '').toLowerCase();
   const actual = String(ctx.from?.username || '').toLowerCase();
-  if (!actual || actual !== expected) {
-    await ctx.reply(`Owner setup denied. Ye link sirf @${config.ownerUsername} account ke liye hai.`);
+  const telegramId = String(ctx.from.id);
+  const configuredAdmin = isAdmin(config, telegramId);
+  if ((!actual || actual !== expected) && !configuredAdmin) {
+    await ctx.reply(`Owner setup denied. Ye link sirf @${config.ownerUsername} ya configured admin account ke liye hai.`);
     return false;
   }
-  const telegramId = String(ctx.from.id);
   const existing = await Setting.findOne({ key: 'owner_chat_id' }).lean();
-  if (existing?.value && String(existing.value) !== telegramId) {
+  if (existing?.value && String(existing.value) !== telegramId && !configuredAdmin) {
     await ctx.reply('Owner pehle hi kisi doosre Telegram account se securely linked hai.');
     return false;
   }
@@ -322,8 +326,15 @@ function createBot(config) {
       const key = d.activationKeyHash ? `🔐 ${d.activationKeyPreview || 'Key issued'}` : '🔒 No key';
       return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${identity}\n   ${key} • ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
     });
-    const keyRows = devices.filter((d) => d.activationKeyHash).map((d) => [Markup.button.callback(`🗑 Delete key • ${d.deviceId}`, `keydelete:${d.deviceId}`)]);
-    return ctx.reply(`📱 DEVICE STATUS (${devices.length})\n\n${lines.join('\n\n') || 'No devices'}`, keyRows.length ? Markup.inlineKeyboard([...keyRows, [Markup.button.callback('↩️ Admin panel', 'admin:status')]]) : adminKeyboard());
+    const actionRows = devices.flatMap((d) => {
+      if (d.activationKeyHash) return [[Markup.button.callback(`🗑 Delete key • ${d.deviceId}`, `keydelete:${d.deviceId}`)]];
+      if (d.keyIssuedToTelegramId) return [[
+        Markup.button.callback(`🔑 Generate • ${d.deviceId}`, `keygen:${d.keyIssuedToTelegramId}:${d.deviceId}`),
+        Markup.button.callback('❌', `keyreject:${d.keyIssuedToTelegramId}:${d.deviceId}`),
+      ]];
+      return [];
+    });
+    return ctx.reply(`📱 DEVICE STATUS (${devices.length})\n\n${lines.join('\n\n') || 'No devices'}`, actionRows.length ? Markup.inlineKeyboard([...actionRows, [Markup.button.callback('↩️ Admin panel', 'admin:status')]]) : adminKeyboard());
   });
   bot.action('admin:maintenance', async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -346,8 +357,13 @@ function createBot(config) {
   }
   bot.action('admin:pending', async (ctx) => {
     if (!(await adminOnly(ctx))) return;
-    const pending = await User.find({ active: false }).sort({ updatedAt: -1 }).limit(30).lean();
-    return ctx.reply(`⏳ PENDING\n\n${pending.map((u) => `${u.telegramId} • ${u.firstName||'-'}`).join('\n') || 'No pending users'}`, adminKeyboard());
+    const pending = await Device.find({ authorized: false, keyIssuedToTelegramId: { $ne: '' } }).sort({ keyRequestedAt: -1 }).limit(30).lean();
+    const lines = pending.map((d, i) => `${i + 1}. ${d.deviceId}\n   ${d.keyIssuedToName || 'User'}${d.keyIssuedToUsername ? ` (@${d.keyIssuedToUsername})` : ''}\n   Telegram ID: ${d.keyIssuedToTelegramId} • ${ageLabel(d.keyRequestedAt)}`);
+    const rows = pending.map((d) => [
+      Markup.button.callback(`🔑 Generate • ${d.deviceId}`, `keygen:${d.keyIssuedToTelegramId}:${d.deviceId}`),
+      Markup.button.callback('❌', `keyreject:${d.keyIssuedToTelegramId}:${d.deviceId}`),
+    ]);
+    return ctx.reply(`⏳ PENDING KEY REQUESTS\n\n${lines.join('\n\n') || 'No pending key requests'}`, rows.length ? Markup.inlineKeyboard([...rows, [Markup.button.callback('↩️ Admin panel', 'admin:status')]]) : adminKeyboard());
   });
   bot.action(/^approve:(\d+):(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -367,7 +383,17 @@ function createBot(config) {
     const text = ctx.message.text.trim();
     const state = pendingAdminInput.get(telegramId);
     if (!state && isAdmin(config, telegramId) && isValidDeviceId(text)) {
-      return ctx.reply('Security key flow enabled. User ko app mein GET KEY tap karwayein; phir GENERATE KEY button yahan aayega.', adminKeyboard());
+      const deviceId = normalizeDeviceId(text);
+      const device = await Device.findOne({ deviceId }).lean();
+      if (!device) return ctx.reply('Device registered nahi hai. User ko app open karke GET KEY tap karwayein.', adminKeyboard());
+      if (!device.keyIssuedToTelegramId) return ctx.reply(`Device ${deviceId} registered hai, lekin user ne bot mein GET KEY request complete nahi ki.`, adminKeyboard());
+      if (device.activationKeyHash) return ctx.reply(`Key pehle se generated hai: ${device.activationKeyPreview}. Zarurat ho to delete karke user se request dobara karwayein.`, Markup.inlineKeyboard([[
+        Markup.button.callback('🗑 DELETE KEY', `keydelete:${deviceId}`),
+      ]]));
+      return ctx.reply(`🔐 KEY REQUEST\n\nUser: ${device.keyIssuedToName || '-'}${device.keyIssuedToUsername ? ` (@${device.keyIssuedToUsername})` : ''}\nTelegram ID: ${device.keyIssuedToTelegramId}\nDevice ID: ${deviceId}`, Markup.inlineKeyboard([[
+        Markup.button.callback('🔑 GENERATE KEY', `keygen:${device.keyIssuedToTelegramId}:${deviceId}`),
+        Markup.button.callback('❌ REJECT', `keyreject:${device.keyIssuedToTelegramId}:${deviceId}`),
+      ]]));
     }
     if (!state || !isAdmin(config, telegramId)) return;
     pendingAdminInput.delete(telegramId);

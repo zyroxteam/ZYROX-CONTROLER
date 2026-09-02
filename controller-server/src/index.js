@@ -74,6 +74,10 @@ async function bootstrap() {
   if (savedOwner?.value && /^\d+$/.test(String(savedOwner.value))) {
     config.ownerChatId = String(savedOwner.value);
     if (!config.adminIds.includes(config.ownerChatId)) config.adminIds.unshift(config.ownerChatId);
+  } else if (config.adminIds.length) {
+    config.ownerChatId = String(config.adminIds[0]);
+    await Setting.findOneAndUpdate({ key: 'owner_chat_id' }, { value: config.ownerChatId }, { upsert: true });
+    console.log(`Owner chat auto-linked from ADMIN_TELEGRAM_IDS: ${config.ownerChatId}`);
   }
   for (const telegramId of config.adminIds) {
     await User.findOneAndUpdate({ telegramId }, { $set: { role: 'admin', active: true }, $setOnInsert: { deviceIds: [] } }, { upsert: true });
@@ -84,7 +88,7 @@ async function bootstrap() {
   async function notifyAdmins(title, device, withApproval) {
     let sent = 0;
     const options = withApproval ? { reply_markup: { inline_keyboard: [[{ text: '✅ APPROVE & ACTIVATE', callback_data: `activate:${device.deviceId}` }]] } } : {};
-    const recipients = config.ownerChatId ? [String(config.ownerChatId)] : [];
+    const recipients = [...new Set([...(config.ownerChatId ? [String(config.ownerChatId)] : []), ...config.adminIds.map(String)])];
     for (const adminId of recipients) {
       try {
         await bot.telegram.sendMessage(adminId, `${title}\n\n${deviceStatusText(device)}`, options);
@@ -121,7 +125,7 @@ async function bootstrap() {
   app.get('/', (_req, res) => res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZYROX CONTROLER</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#342060,#0d0a18 55%);font:16px system-ui;color:#f4efff}.card{width:min(92vw,560px);padding:38px;border:1px solid #6d4ca4;border-radius:24px;background:#171126;box-shadow:0 24px 80px #0008}.brand{font-size:12px;letter-spacing:.24em;color:#ae8cff}.title{font-size:34px;font-weight:800;margin:10px 0}.row{display:flex;gap:10px;flex-wrap:wrap;margin:25px 0}.chip{padding:10px 13px;background:#261b3d;border-radius:12px}.status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:#201735}.dot{width:10px;height:10px;border-radius:50%;background:#41dd91;box-shadow:0 0 18px #41dd91}.muted{color:#b7aacd;line-height:1.5}</style></head><body><main class="card"><div class="brand">ZYROX SYSTEMS</div><div class="title">COLOUR DICE CONTROL</div><p class="muted">Telegram controlled Red, Green, Blue and Yellow dice commands with Device ID activation.</p><div class="row"><span class="chip">🔴 RED</span><span class="chip">🟢 GREEN</span><span class="chip">🔵 BLUE</span><span class="chip">🟡 YELLOW</span></div><div class="status"><span class="dot"></span><strong>Service online</strong></div></main></body></html>`));
 
   app.get('/health', asyncRoute(async (_req, res) => res.json({
-    ok: true, service: 'zyrox-colour-dice-controler', version: '1.3.0', bot: `@${botUsername}`, botMode: config.botMode,
+    ok: true, service: 'zyrox-colour-dice-controler', version: '1.3.1', bot: `@${botUsername}`, botMode: config.botMode,
     activationOwner: config.adminPublicHandle, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), startedAt,
   })));
@@ -165,7 +169,7 @@ async function bootstrap() {
       { $set: { active: true, selectedDeviceId: device.deviceId }, $addToSet: { deviceIds: device.deviceId } },
       { upsert: true },
     );
-    const recipients = config.ownerChatId ? [String(config.ownerChatId)] : [];
+    const recipients = [...new Set([...(config.ownerChatId ? [String(config.ownerChatId)] : []), ...config.adminIds.map(String)])];
     for (const adminId of recipients) {
       await bot.telegram.sendMessage(adminId, `✅ KEY ACTIVATED\n\nDevice ID: ${device.deviceId}\nUser: ${device.keyIssuedToName || '-'}${device.keyIssuedToUsername ? ` (@${device.keyIssuedToUsername})` : ''}\nTelegram ID: ${device.linkedTelegramId}\nKey: ${device.activationKeyPreview}`).catch(() => null);
     }
