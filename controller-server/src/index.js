@@ -14,6 +14,36 @@ const startedAt = new Date();
 let botUsername = '';
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
+function cleanText(value, max = 80) {
+  value = String(value || '').trim();
+  return value.length > max ? value.slice(0, max) : value;
+}
+
+function applyTelemetry(device, input) {
+  const telemetry = input && typeof input === 'object' ? input : {};
+  const previous = device.lastTelemetryAt ? new Date(device.lastTelemetryAt).getTime() : 0;
+  const hasConsentedTelemetry = Boolean(cleanText(telemetry.consentVersion, 20));
+  device.onlineAt = new Date();
+  if (!hasConsentedTelemetry) return false;
+  const wasBackgroundOffline = !previous || Date.now() - previous > 20 * 60 * 1000;
+  const battery = Number(telemetry.batteryLevel);
+  device.manufacturer = cleanText(telemetry.manufacturer);
+  device.model = cleanText(telemetry.model);
+  device.androidVersion = cleanText(telemetry.androidVersion, 30);
+  device.sdkInt = Number.isInteger(Number(telemetry.sdkInt)) ? Number(telemetry.sdkInt) : null;
+  device.batteryLevel = Number.isFinite(battery) ? Math.max(-1, Math.min(100, Math.round(battery))) : -1;
+  device.charging = Boolean(telemetry.charging);
+  device.telemetryConsentVersion = cleanText(telemetry.consentVersion, 20);
+  device.lastTelemetryAt = new Date();
+  return wasBackgroundOffline;
+}
+
+function deviceStatusText(device) {
+  const phone = [device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown model';
+  const battery = device.batteryLevel >= 0 ? `${device.batteryLevel}%${device.charging ? ' • Charging ⚡' : ''}` : 'Unknown';
+  return `Device ID: ${device.deviceId}\nPhone: ${phone}\nAndroid: ${device.androidVersion || 'Unknown'}${device.sdkInt ? ` (SDK ${device.sdkInt})` : ''}\nBattery: ${battery}\nStatus: 🟢 Online\nApp: ${device.appVersion || '-'}`;
+}
+
 async function authenticateDevice(req, res, next) {
   const deviceId = normalizeDeviceId(req.params.deviceId || req.body?.deviceId);
   const secret = String(req.get('X-Device-Secret') || req.body?.deviceSecret || '');
@@ -34,6 +64,19 @@ async function bootstrap() {
 
   const bot = createBot(config);
   botUsername = (await bot.telegram.getMe()).username;
+  async function notifyAdmins(title, device, withApproval) {
+    let sent = 0;
+    const options = withApproval ? { reply_markup: { inline_keyboard: [[{ text: '✅ APPROVE & ACTIVATE', callback_data: `activate:${device.deviceId}` }]] } } : {};
+    for (const adminId of config.adminIds) {
+      try {
+        await bot.telegram.sendMessage(adminId, `${title}\n\n${deviceStatusText(device)}`, options);
+        sent += 1;
+      } catch (error) {
+        console.error(`Admin notify failed for ${adminId}:`, error.message);
+      }
+    }
+    return sent;
+  }
   const app = express();
   app.set('trust proxy', 1);
   app.use(helmet({ contentSecurityPolicy: false }));
@@ -60,7 +103,7 @@ async function bootstrap() {
   app.get('/', (_req, res) => res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZYROX CONTROLER</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#342060,#0d0a18 55%);font:16px system-ui;color:#f4efff}.card{width:min(92vw,560px);padding:38px;border:1px solid #6d4ca4;border-radius:24px;background:#171126;box-shadow:0 24px 80px #0008}.brand{font-size:12px;letter-spacing:.24em;color:#ae8cff}.title{font-size:34px;font-weight:800;margin:10px 0}.row{display:flex;gap:10px;flex-wrap:wrap;margin:25px 0}.chip{padding:10px 13px;background:#261b3d;border-radius:12px}.status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:#201735}.dot{width:10px;height:10px;border-radius:50%;background:#41dd91;box-shadow:0 0 18px #41dd91}.muted{color:#b7aacd;line-height:1.5}</style></head><body><main class="card"><div class="brand">ZYROX SYSTEMS</div><div class="title">COLOUR DICE CONTROL</div><p class="muted">Telegram controlled Red, Green, Blue and Yellow dice commands with Device ID activation.</p><div class="row"><span class="chip">🔴 RED</span><span class="chip">🟢 GREEN</span><span class="chip">🔵 BLUE</span><span class="chip">🟡 YELLOW</span></div><div class="status"><span class="dot"></span><strong>Service online</strong></div></main></body></html>`));
 
   app.get('/health', asyncRoute(async (_req, res) => res.json({
-    ok: true, service: 'zyrox-colour-dice-controler', version: '1.1.0', bot: `@${botUsername}`, botMode: config.botMode,
+    ok: true, service: 'zyrox-colour-dice-controler', version: '1.2.0', bot: `@${botUsername}`, botMode: config.botMode,
     activationOwner: config.adminPublicHandle, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), startedAt,
   })));
@@ -68,21 +111,26 @@ async function bootstrap() {
   app.post('/api/v1/devices/register', asyncRoute(async (req, res) => {
     const deviceId = normalizeDeviceId(req.body?.deviceId);
     const deviceSecret = String(req.body?.deviceSecret || '');
-    const appVersion = String(req.body?.appVersion || '').slice(0, 40);
+    const appVersion = cleanText(req.body?.appVersion, 40);
     if (!isValidDeviceId(deviceId) || !isValidDeviceSecret(deviceSecret)) return res.status(400).json({ ok: false, error: 'invalid_device_data' });
     const secretHash = hashSecret(deviceSecret);
     let device = await Device.findOne({ deviceId });
     if (device && !safeEqualHex(device.secretHash, secretHash)) return res.status(409).json({ ok: false, error: 'device_id_conflict' });
-    if (!device) device = await Device.create({ deviceId, secretHash, appVersion, onlineAt: new Date() });
-    else { device.appVersion = appVersion; device.onlineAt = new Date(); await device.save(); }
+    const isNew = !device;
+    if (!device) device = new Device({ deviceId, secretHash, appVersion, registeredAt: new Date() });
+    device.appVersion = appVersion;
+    const wasBackgroundOffline = applyTelemetry(device, req.body?.telemetry);
+    await device.save();
 
     if (!device.adminNotifiedAt) {
-      for (const adminId of config.adminIds) {
-        await bot.telegram.sendMessage(adminId, `📱 NEW ZYROX DEVICE\n\nDevice ID: ${deviceId}\nApp version: ${appVersion || '-'}\n\nIs ID ko bot mein send karke activate karein.`, {
-          reply_markup: { inline_keyboard: [[{ text: '✅ ACTIVATE DEVICE', callback_data: `activate:${deviceId}` }]] },
-        }).catch((error) => console.error(`Admin notify failed for ${adminId}:`, error.message));
+      if (await notifyAdmins('📱 NEW INSTALL / FIRST OPEN', device, true)) {
+        device.adminNotifiedAt = new Date();
+        device.lastOnlineNoticeAt = new Date();
+        await device.save();
       }
-      device.adminNotifiedAt = new Date();
+    } else if (!isNew && device.authorized && wasBackgroundOffline && (!device.lastOnlineNoticeAt || Date.now() - new Date(device.lastOnlineNoticeAt).getTime() > 20 * 60 * 1000)) {
+      await notifyAdmins('🟢 DEVICE BACK ONLINE', device, false);
+      device.lastOnlineNoticeAt = new Date();
       await device.save();
     }
     return res.json({ ok: true, deviceId, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${deviceId}` });
@@ -91,6 +139,17 @@ async function bootstrap() {
   app.get('/api/v1/devices/:deviceId/status', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
     const device = req.zyroxDevice; device.onlineAt = new Date(); await device.save();
     return res.json({ ok: true, deviceId: device.deviceId, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
+  }));
+
+  app.post('/api/v1/devices/:deviceId/heartbeat', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
+    const device = req.zyroxDevice;
+    const wasBackgroundOffline = applyTelemetry(device, req.body);
+    if (device.authorized && wasBackgroundOffline && (!device.lastOnlineNoticeAt || Date.now() - new Date(device.lastOnlineNoticeAt).getTime() > 20 * 60 * 1000)) {
+      await notifyAdmins('🟢 BACKGROUND DEVICE ONLINE', device, false);
+      device.lastOnlineNoticeAt = new Date();
+    }
+    await device.save();
+    return res.json({ ok: true, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
   }));
 
   app.get('/api/v1/devices/:deviceId/next-command', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {

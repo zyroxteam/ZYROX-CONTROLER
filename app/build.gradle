@@ -9,8 +9,8 @@ android {
         applicationId "com.zyrox.controler"
         minSdk 21
         targetSdk 33
-        versionCode 111
-        versionName "1.1.1"
+        versionCode 120
+        versionName "1.2.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,4 +36,5 @@ dependencies {
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
     implementation 'com.github.bumptech.glide:glide:4.15.1'
+    implementation 'androidx.work:work-runtime:2.8.1'
 }

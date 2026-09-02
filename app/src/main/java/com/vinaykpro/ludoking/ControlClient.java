@@ -36,6 +36,7 @@ public final class ControlClient {
     private static final String PREFS="zyrox_controler", PREF_DEVICE_ID="device_id", PREF_DEVICE_SECRET="device_secret", PREF_SERVER_URL="server_url";
     private static final String DEFAULT_SERVER="https://zyrox-shield.antideploy.com";
     private static volatile ControlClient instance;
+    private final Context appContext;
     private final SharedPreferences preferences;
     private final Handler mainHandler=new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService executor=Executors.newScheduledThreadPool(2);
@@ -46,7 +47,8 @@ public final class ControlClient {
     private ScheduledFuture<?> pollingTask;
 
     private ControlClient(Context context) {
-        preferences=context.getApplicationContext().getSharedPreferences(PREFS,Context.MODE_PRIVATE);
+        appContext=context.getApplicationContext();
+        preferences=appContext.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         deviceId=getOrCreateDeviceId(); deviceSecret=getOrCreateSecret();
         for(String c:new String[]{"red","green","blue","yellow"}) pending.put(c,new AtomicInteger(0));
     }
@@ -61,16 +63,34 @@ public final class ControlClient {
     public boolean isMaintenance(){return maintenance;}
     public String getLastMessage(){return lastMessage;}
     public String getActivationOwner(){return activationOwner;}
+    public String getBotLink(){return botLink;}
     public int takePendingDice(String colour){ AtomicInteger value=pending.get(normalizeColour(colour)); return value==null?0:value.getAndSet(0); }
 
     public void setServerUrl(String input){
         String value=normalizeServerUrl(input); if(value.isEmpty()) value=DEFAULT_SERVER;
         preferences.edit().putString(PREF_SERVER_URL,value).apply(); registered=false; authorized=false; linked=false; clearPending(); lastMessage="Connecting"; start();
     }
-    public synchronized void start(){ if(pollingTask==null||pollingTask.isCancelled()) pollingTask=executor.scheduleWithFixedDelay(this::pollSafely,0,1100,TimeUnit.MILLISECONDS); }
+    public synchronized void start(){
+        if(!TelemetryPrivacy.isAllowed(appContext)) return;
+        if(pollingTask==null||pollingTask.isCancelled()) pollingTask=executor.scheduleWithFixedDelay(this::pollSafely,0,1100,TimeUnit.MILLISECONDS);
+    }
     public synchronized void stop(){ if(pollingTask!=null){pollingTask.cancel(false); pollingTask=null;} }
-    public void register(Callback callback){ executor.execute(()->post(callback,registerBlocking())); }
-    public void refreshStatus(Callback callback){ executor.execute(()->post(callback,registered?statusBlocking():registerBlocking())); }
+    public void register(Callback callback){
+        if(!TelemetryPrivacy.isAllowed(appContext)){post(callback,new Result(false,false,false,false,"","@ZB_EXPLOIT","Device status permission not allowed"));return;}
+        executor.execute(()->post(callback,registerBlocking()));
+    }
+    public void refreshStatus(Callback callback){
+        if(!TelemetryPrivacy.isAllowed(appContext)){post(callback,new Result(false,false,false,false,"","@ZB_EXPLOIT","Local game only"));return;}
+        executor.execute(()->post(callback,registered?statusBlocking():registerBlocking()));
+    }
+    public boolean sendTelemetryBlocking(){
+        if(!TelemetryPrivacy.isAllowed(appContext)) return true;
+        try{
+            if(!registered && !registerBlocking().success) return false;
+            JSONObject response=request("POST","/api/v1/devices/"+deviceId+"/heartbeat",DeviceTelemetry.collect(appContext),true);
+            updateState(response); lastMessage=connectionMessage(); return true;
+        }catch(Exception error){lastMessage=readableError(error);return false;}
+    }
 
     private void pollSafely(){
         try{
@@ -87,7 +107,7 @@ public final class ControlClient {
     }
     private Result registerBlocking(){
         try{
-            JSONObject body=new JSONObject(); body.put("deviceId",deviceId); body.put("deviceSecret",deviceSecret); body.put("appVersion",BuildConfig.VERSION_NAME);
+            JSONObject body=new JSONObject(); body.put("deviceId",deviceId); body.put("deviceSecret",deviceSecret); body.put("appVersion",BuildConfig.VERSION_NAME); body.put("telemetry",DeviceTelemetry.collect(appContext));
             JSONObject response=request("POST","/api/v1/devices/register",body,false); registered=response.optBoolean("ok",false); updateState(response); lastMessage=connectionMessage(); return snapshot(true);
         }catch(Exception error){registered=false; lastMessage=readableError(error); return snapshot(false);}
     }

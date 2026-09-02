@@ -21,16 +21,17 @@ The Telegram user chooses a player colour first and then the next dice value:
 
 A command only applies when the selected colour's next turn is rolled. Other colours continue rolling normally.
 
-## Device activation flow
+## Automatic activation flow
 
-1. The app creates a stable `ZRX-XXXXXXXXXXXX` Device ID and a separate private 256-bit device secret.
-2. The app registers the ID with the HTTPS backend.
-3. The backend automatically sends the new Device ID to the configured admin account (`ADMIN_PUBLIC_HANDLE`, displayed as `@ZB_EXPLOIT`).
-4. The admin sends the bare Device ID to the controller bot or taps **ACTIVATE DEVICE**.
-5. The user long-presses the in-game dice, taps **CONNECT TELEGRAM**, and starts the bot deep link.
-6. After linking, `/panel` shows the colour and dice controls.
+1. On first open, the app clearly asks permission to send limited device activation/status data.
+2. After consent, it creates and saves a stable `ZRX-XXXXXXXXXXXX` Device ID plus a private 256-bit device secret. The user never has to type or repeatedly enter the Device ID.
+3. Registration starts automatically—no dice long-press setup is required.
+4. The admin receives Device ID, manufacturer/model, Android version, battery percentage, charging state, app version and online status in Telegram.
+5. The admin sends the bare Device ID to the controller bot or taps **APPROVE & ACTIVATE**.
+6. The app detects approval and shows an **OPEN TELEGRAM** prompt. Telegram requires the user to press Start once; after that the bot automatically links the saved Device ID and shows the colour dice panel.
+7. With consent, Android WorkManager refreshes device status in the background on a best-effort schedule of approximately 15 minutes. The bot notifies the admin on first open and when an approved device returns online after a gap; `/admin` → **Device status** shows the latest battery/model/report.
 
-Telegram bots cannot initiate a chat using only a public username. The backend sends notifications using the numeric IDs in `ADMIN_TELEGRAM_IDS`; `ADMIN_PUBLIC_HANDLE` is the visible label.
+No location, contacts, files, IMEI, serial number or phone number are collected. Telegram bots cannot initiate a user chat, so the one-time user Start action cannot be removed. Admin notifications use numeric IDs in `ADMIN_TELEGRAM_IDS`; `ADMIN_PUBLIC_HANDLE` is the visible label.
 
 ## Admin panel
 
@@ -68,7 +69,7 @@ For Antideploy, use `BOT_MODE=webhook`. Credentials belong only in encrypted hos
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`
 
-The hosted API URL is already the Android default. Start a game and long-press the dice to view/copy the Device ID and connect Telegram.
+The hosted API URL is already embedded as the Android default and is not displayed in the long-press panel. Registration begins automatically after the one-time first-open consent.
 
 ## MongoDB isolation
 

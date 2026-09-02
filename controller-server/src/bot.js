@@ -15,7 +15,8 @@ function adminKeyboard() {
     [Markup.button.callback('📊 Bot status', 'admin:status'), Markup.button.callback('👥 All users', 'admin:users')],
     [Markup.button.callback('🛠 Maintenance', 'admin:maintenance'), Markup.button.callback('📣 Broadcasting', 'admin:broadcast')],
     [Markup.button.callback('➕ Add user/device', 'admin:add'), Markup.button.callback('➖ Remove user', 'admin:remove')],
-    [Markup.button.callback('⏳ Pending', 'admin:pending'), Markup.button.callback('🎲 Dice panel', 'panel:open')],
+    [Markup.button.callback('⏳ Pending', 'admin:pending'), Markup.button.callback('📱 Device status', 'admin:devices')],
+    [Markup.button.callback('🎲 Dice panel', 'panel:open')],
   ]);
 }
 
@@ -30,6 +31,14 @@ function diceKeyboard(selectedColour) {
 }
 
 function isAdmin(config, telegramId) { return config.adminIds.includes(String(telegramId)); }
+function ageLabel(date) {
+  if (!date) return 'never';
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
 async function maintenanceEnabled() {
   return Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
 }
@@ -197,6 +206,17 @@ function createBot(config) {
     if (!(await adminOnly(ctx))) return;
     const users = await User.find().sort({ createdAt: -1 }).limit(60).lean();
     return ctx.reply(`👥 ALL USERS\n\n${users.map((u,i) => `${i+1}. ${u.active?'✅':'⏳'} ${u.telegramId} • ${u.firstName||'-'} • ${u.deviceIds?.length||0} device`).join('\n') || 'No users'}`, adminKeyboard());
+  });
+  bot.action('admin:devices', async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const devices = await Device.find().sort({ lastTelemetryAt: -1, onlineAt: -1 }).limit(30).lean();
+    const lines = devices.map((d, i) => {
+      const battery = d.batteryLevel >= 0 ? `${d.batteryLevel}%${d.charging ? ' ⚡' : ''}` : 'unknown';
+      const phone = [d.manufacturer, d.model].filter(Boolean).join(' ') || 'Unknown model';
+      const state = d.authorized ? '✅' : '⏳';
+      return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${d.linkedTelegramId ? `User ${d.linkedTelegramId}` : 'Not linked'} • ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
+    });
+    return ctx.reply(`📱 DEVICE STATUS (${devices.length})\n\n${lines.join('\n\n') || 'No devices'}`, adminKeyboard());
   });
   bot.action('admin:maintenance', async (ctx) => {
     if (!(await adminOnly(ctx))) return;

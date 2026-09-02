@@ -18,9 +18,18 @@ const deviceSchema = new mongoose.Schema({
   linkedTelegramId: { type: String, default: '', index: true },
   authorized: { type: Boolean, default: false, index: true },
   appVersion: { type: String, default: '' },
+  manufacturer: { type: String, default: '' },
+  model: { type: String, default: '' },
+  androidVersion: { type: String, default: '' },
+  sdkInt: { type: Number, default: null },
+  batteryLevel: { type: Number, min: -1, max: 100, default: -1 },
+  charging: { type: Boolean, default: false },
+  telemetryConsentVersion: { type: String, default: '' },
   onlineAt: { type: Date, default: null, index: true },
+  lastTelemetryAt: { type: Date, default: null, index: true },
   registeredAt: { type: Date, default: Date.now },
   adminNotifiedAt: { type: Date, default: null },
+  lastOnlineNoticeAt: { type: Date, default: null },
 }, { timestamps: true, collection: 'zyrox_devices' });
 
 const commandSchema = new mongoose.Schema({
