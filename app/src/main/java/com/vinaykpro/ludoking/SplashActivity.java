@@ -128,13 +128,13 @@ public class SplashActivity extends AppCompatActivity {
             statusText.setText("●  OPENING TELEGRAM BOT");
             client.register(result -> {
                 getKey.setEnabled(true);
-                if (!result.success || result.botLink.isEmpty()) {
-                    statusText.setText("●  " + result.message);
-                    Toast.makeText(this, "Telegram bot link unavailable", Toast.LENGTH_LONG).show();
-                    return;
+                String link = result.botLink.isEmpty() ? client.getBotLink() : result.botLink;
+                statusText.setText(result.success ? "●  TELEGRAM MEIN START PRESS KAREIN" : "●  BOT OPENING • REGISTRATION RETRYING");
+                statusText.setTextColor(result.success ? Color.rgb(65, 221, 145) : Color.rgb(255, 190, 86));
+                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(link))); }
+                catch (Exception error) {
+                    Toast.makeText(this, "Telegram install/open karein: @ZgudruddeBot", Toast.LENGTH_LONG).show();
                 }
-                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(result.botLink))); }
-                catch (Exception error) { Toast.makeText(this, "Telegram install/open karein", Toast.LENGTH_LONG).show(); }
             });
         });
         activate.setOnClickListener(view -> {
