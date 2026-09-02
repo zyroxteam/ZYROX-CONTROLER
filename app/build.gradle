@@ -6,11 +6,11 @@ android {
     compileSdk 33
 
     defaultConfig {
-        applicationId "com.zyrox.controler"
+        applicationId "com.ludo.king"
         minSdk 21
         targetSdk 33
-        versionCode 120
-        versionName "1.2.0"
+        versionCode 10400401
+        versionName "10.4.0.401"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
