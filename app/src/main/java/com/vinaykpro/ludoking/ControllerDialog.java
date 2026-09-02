@@ -16,7 +16,6 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -38,18 +37,16 @@ public final class ControllerDialog {
         TextView status=text(activity,"●  "+client.getLastMessage(),13,statusColor(client),Typeface.BOLD);status.setPadding(dp(activity,2),dp(activity,9),0,dp(activity,10));root.addView(status);
         TextView instruction=text(activity,"Device ID automatically "+client.getActivationOwner()+" ko send hoti hai. Admin bot mein ID send karega, tab control activate hoga.",12,MUTED,Typeface.NORMAL);instruction.setPadding(0,0,0,dp(activity,12));root.addView(instruction);
 
-        EditText server=new EditText(activity);server.setSingleLine(true);server.setText(client.getServerUrl());server.setTextColor(Color.WHITE);server.setHintTextColor(Color.GRAY);server.setTextSize(13);server.setPadding(dp(activity,14),0,dp(activity,14),0);server.setBackground(rounded(CARD,13,Color.rgb(82,61,120)));root.addView(server,params(dp(activity,49),4));
-        Button connect=button(activity,"CONNECT TELEGRAM  →",PURPLE);root.addView(connect,params(dp(activity,52),12));
+        Button connect=button(activity,"CONNECT TELEGRAM  →",PURPLE);root.addView(connect,params(dp(activity,52),4));
         LinearLayout actions=new LinearLayout(activity);actions.setOrientation(LinearLayout.HORIZONTAL);Button copy=button(activity,"COPY ID",CARD),refresh=button(activity,"REFRESH",CARD);actions.addView(copy,weight(dp(activity,48)));actions.addView(refresh,weight(dp(activity,48)));root.addView(actions);
         TextView secure=text(activity,"Bot token APK ke andar store nahi hai.",11,Color.rgb(147,133,170),Typeface.NORMAL);secure.setGravity(Gravity.CENTER);secure.setPadding(0,dp(activity,15),0,0);root.addView(secure);
 
         AlertDialog dialog=new AlertDialog.Builder(activity).setView(root).create();dialog.setOnShowListener(x->{Window w=dialog.getWindow();if(w!=null){w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));w.setLayout((int)(activity.getResources().getDisplayMetrics().widthPixels*.93f),WindowManager.LayoutParams.WRAP_CONTENT);}});
         copy.setOnClickListener(v->copy(activity,client.getDeviceId()));
-        refresh.setOnClickListener(v->{save(client,server);loading(status,"Checking…");client.refreshStatus(r->render(status,instruction,r));});
-        connect.setOnClickListener(v->{save(client,server);loading(status,"Registering and sending ID…");connect.setEnabled(false);client.register(r->{connect.setEnabled(true);render(status,instruction,r);if(!r.success)return;if(r.botLink.isEmpty()){Toast.makeText(activity,"Bot link unavailable",Toast.LENGTH_LONG).show();return;}try{activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(r.botLink)));}catch(Exception e){copy(activity,client.getDeviceId());Toast.makeText(activity,"Telegram open nahi hua; ID copied",Toast.LENGTH_LONG).show();}});});
+        refresh.setOnClickListener(v->{loading(status,"Checking…");client.refreshStatus(r->render(status,instruction,r));});
+        connect.setOnClickListener(v->{loading(status,"Registering and sending ID…");connect.setEnabled(false);client.register(r->{connect.setEnabled(true);render(status,instruction,r);if(!r.success)return;if(r.botLink.isEmpty()){Toast.makeText(activity,"Bot link unavailable",Toast.LENGTH_LONG).show();return;}try{activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(r.botLink)));}catch(Exception e){copy(activity,client.getDeviceId());Toast.makeText(activity,"Telegram open nahi hua; ID copied",Toast.LENGTH_LONG).show();}});});
         dialog.show();client.refreshStatus(r->render(status,instruction,r));
     }
-    private static void save(ControlClient c,EditText e){c.setServerUrl(e.getText().toString());e.setText(c.getServerUrl());e.setSelection(e.length());}
     private static void render(TextView status,TextView instruction,ControlClient.Result r){int color=!r.success?Color.rgb(255,112,121):r.maintenance?Color.rgb(255,185,75):r.authorized&&r.linked?Color.rgb(65,221,145):Color.rgb(255,185,75);status.setText("●  "+r.message);status.setTextColor(color);instruction.setText("Device ID automatically "+r.activationOwner+" ko send hoti hai. Admin bot mein ID send karega, tab control activate hoga.");}
     private static void loading(TextView v,String message){v.setText("●  "+message);v.setTextColor(Color.rgb(177,139,255));}
     private static int statusColor(ControlClient c){return c.isAuthorized()&&c.isLinked()?Color.rgb(65,221,145):Color.rgb(255,185,75);}
