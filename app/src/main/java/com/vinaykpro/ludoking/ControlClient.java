@@ -50,7 +50,7 @@ public final class ControlClient {
         appContext=context.getApplicationContext();
         preferences=appContext.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         deviceId=getOrCreateDeviceId(); deviceSecret=getOrCreateSecret();
-        botLink="https://t.me/ZgudruddeBot?start="+deviceId;
+        botLink="https://t.me/ZyroxLudoKingbot?start="+deviceId;
         for(String c:new String[]{"red","green","blue","yellow"}) pending.put(c,new AtomicInteger(0));
     }
     public static ControlClient get(Context context) {

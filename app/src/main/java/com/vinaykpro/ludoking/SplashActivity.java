@@ -133,7 +133,7 @@ public class SplashActivity extends AppCompatActivity {
                 statusText.setTextColor(result.success ? Color.rgb(65, 221, 145) : Color.rgb(255, 190, 86));
                 try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(link))); }
                 catch (Exception error) {
-                    Toast.makeText(this, "Telegram install/open karein: @ZgudruddeBot", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "Telegram install/open karein: @ZyroxLudoKingbot", Toast.LENGTH_LONG).show();
                 }
             });
         });

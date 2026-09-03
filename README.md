@@ -56,7 +56,7 @@ Direct activation by a bare Device ID is disabled; every device must complete th
 
 ### Direct owner approval messages
 
-Telegram does not allow a bot to DM a private username until that account starts the bot once. From the configured `@ZB_EXPLOIT` account, open `https://t.me/ZgudruddeBot?start=owner` and press **Start**. The server verifies the exact username, permanently stores that numeric chat ID, grants owner admin access, forwards pending device requests, and sends all future first-open approval messages directly to that owner chat.
+Telegram does not allow a bot to DM a private user until that account starts the bot once. From the configured admin account, open `https://t.me/ZyroxLudoKingbot?start=owner` and press **Start**. The server verifies that the numeric Telegram ID is configured as an admin (or that the owner username matches), permanently stores the chat ID, forwards pending device requests, and sends future approval messages directly to that owner chat.
 
 ## Server setup
 
