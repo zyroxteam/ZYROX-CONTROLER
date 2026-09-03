@@ -1,8 +1,12 @@
 const { Telegraf, Markup } = require('telegraf');
 const { User, Device, Command, Setting, Audit } = require('./models');
-const { isValidDeviceId, normalizeDeviceId, userLabel, isValidColour, generateActivationKey, hashSecret } = require('./utils');
+const {
+  isValidDeviceId, normalizeDeviceId, userLabel, isValidColour, generateActivationKey, hashSecret,
+  normalizeActivationKey, isValidActivationKey, activationKeyMatchesDevice,
+} = require('./utils');
 
 const pendingAdminInput = new Map();
+const pendingKeyInput = new Map();
 const COLOUR_META = {
   red: { emoji: '🔴', label: 'RED' },
   green: { emoji: '🟢', label: 'GREEN' },
@@ -17,6 +21,13 @@ function adminKeyboard() {
     [Markup.button.callback('➕ Add user/device', 'admin:add'), Markup.button.callback('➖ Remove user', 'admin:remove')],
     [Markup.button.callback('⏳ Pending', 'admin:pending'), Markup.button.callback('📱 Device status', 'admin:devices')],
     [Markup.button.callback('🎲 Dice panel', 'panel:open')],
+  ]);
+}
+
+function keyAccessKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🔑 ADD YOUR KEY', 'access:addkey')],
+    [Markup.button.callback('🎲 OPEN DICE CONTROLS', 'panel:open')],
   ]);
 }
 
@@ -65,7 +76,7 @@ async function getAuthorizedUser(ctx, config) {
   let user = await User.findOne({ telegramId });
   if (isAdmin(config, telegramId)) user = await upsertTelegramUser(ctx, { role: 'admin', active: true });
   if (!user?.active) {
-    await ctx.reply(`Access pending.\n\nYour Telegram user ID: ${telegramId}\nAdmin ko ye User ID ya app ka Device ID send karein.`);
+    await ctx.reply(`Device control add nahi hai.\n\nYour Telegram user ID: ${telegramId}\nApni permanent device key add karne ke liye niche button press karein.`, keyAccessKeyboard());
     return null;
   }
   return user;
@@ -75,8 +86,11 @@ async function showDicePanel(ctx, config) {
   const user = await getAuthorizedUser(ctx, config);
   if (!user) return;
   if ((await maintenanceEnabled()) && user.role !== 'admin') return ctx.reply('🛠 Controller maintenance mode mein hai.');
-  const devices = await Device.find({ deviceId: { $in: user.deviceIds || [] }, authorized: true, linkedTelegramId: String(ctx.from.id) }).sort({ updatedAt: -1 });
-  if (!devices.length) return ctx.reply('No connected device. App mein dice long-press karke “Connect Telegram” tap karein.');
+  const devices = await Device.find({
+    deviceId: { $in: user.deviceIds || [] }, authorized: true,
+    controllerTelegramIds: String(ctx.from.id),
+  }).sort({ updatedAt: -1 });
+  if (!devices.length) return ctx.reply('No connected device. Permanent device key add karein.', keyAccessKeyboard());
   const selected = devices.find((d) => d.deviceId === user.selectedDeviceId) || devices[0];
   if (selected.deviceId !== user.selectedDeviceId) { user.selectedDeviceId = selected.deviceId; await user.save(); }
   const online = selected.onlineAt && Date.now() - selected.onlineAt.getTime() <= config.deviceOnlineSeconds * 1000;
@@ -89,6 +103,40 @@ async function showDicePanel(ctx, config) {
     `Selected colour: ${meta.emoji} ${meta.label}`, '',
     'Pehle colour select karein, phir next dice value:',
   ].join('\n'), diceKeyboard(colour));
+}
+
+async function linkControllerByKey(ctx, config, rawKey) {
+  const telegramId = String(ctx.from?.id || '');
+  const activationKey = normalizeActivationKey(rawKey);
+  if (!isValidActivationKey(activationKey)) {
+    await ctx.reply('❌ Invalid key format. Example: LK-DEVICEID-RANDOMKEY', keyAccessKeyboard());
+    return false;
+  }
+  const device = await Device.findOne({ activationKeyHash: hashSecret(activationKey), authorized: true });
+  if (!device || !activationKeyMatchesDevice(activationKey, device.deviceId)) {
+    await ctx.reply('❌ Key invalid, deleted, ya device abhi active nahi hai. Owner se active key lein.', keyAccessKeyboard());
+    await audit(telegramId, 'shared_key_rejected', '', { preview: `••••${activationKey.slice(-6)}` });
+    return false;
+  }
+  const user = await upsertTelegramUser(ctx, { active: true });
+  user.deviceIds = [...new Set([...(user.deviceIds || []), device.deviceId])];
+  user.selectedDeviceId = device.deviceId;
+  await user.save();
+  if (!(device.controllerTelegramIds || []).includes(telegramId)) {
+    device.controllerTelegramIds = [...new Set([...(device.controllerTelegramIds || []), telegramId])];
+    await device.save();
+  }
+  await audit(telegramId, 'shared_key_controller_added', device.deviceId, {
+    username: ctx.from?.username || '', controllerCount: device.controllerTelegramIds.length,
+  });
+  const username = ctx.from?.username ? `@${ctx.from.username}` : 'No username';
+  for (const adminId of approvalRecipients(config)) {
+    await ctx.telegram.sendMessage(adminId, `🔑 SHARED KEY ADDED\n\nUser: ${user.firstName || '-'} (${username})\nTelegram ID: ${telegramId}\nDevice ID: ${device.deviceId}\nControllers: ${device.controllerTelegramIds.length}`).catch(() => null);
+  }
+  await ctx.reply(`✅ KEY ADDED\n\nDevice: ${device.deviceId}\nAb is Telegram account se colour dice control kar sakte hain.`, Markup.inlineKeyboard([[
+    Markup.button.callback('🎲 OPEN DICE CONTROLS', 'panel:open'),
+  ]]));
+  return true;
 }
 
 async function activateDevice(_config, _actorTelegramId, _deviceId) {
@@ -131,7 +179,8 @@ async function claimOwner(ctx, config) {
 async function connectPayload(ctx, config, rawPayload) {
   const deviceId = normalizeDeviceId(rawPayload);
   if (!isValidDeviceId(deviceId)) {
-    await ctx.reply(`Welcome to ZYROX CONTROLER.\nYour Telegram user ID: ${ctx.from.id}\nApp ke GET KEY button se bot open karein.`);
+    await upsertTelegramUser(ctx);
+    await ctx.reply(`Welcome to ZYROX CONTROLER.\nYour Telegram user ID: ${ctx.from.id}\n\nApne ya kisi trusted device ko control karne ke liye permanent key add karein.`, keyAccessKeyboard());
     if (await User.exists({ telegramId: String(ctx.from.id), active: true })) await showDicePanel(ctx, config);
     return;
   }
@@ -141,16 +190,21 @@ async function connectPayload(ctx, config, rawPayload) {
   const admin = isAdmin(config, telegramId);
   const user = await upsertTelegramUser(ctx, admin ? { role: 'admin', active: true } : {});
 
-  if (device.authorized && device.linkedTelegramId === telegramId) {
+  const alreadyControls = (device.controllerTelegramIds || []).includes(telegramId) || device.linkedTelegramId === telegramId;
+  if (device.authorized && alreadyControls) {
     user.active = true;
     user.deviceIds = [...new Set([...(user.deviceIds || []), deviceId])];
     user.selectedDeviceId = deviceId;
     await user.save();
+    if (!(device.controllerTelegramIds || []).includes(telegramId)) {
+      device.controllerTelegramIds = [...new Set([...(device.controllerTelegramIds || []), telegramId])];
+      await device.save();
+    }
     await ctx.reply(`✅ Device active: ${deviceId}`);
     return showDicePanel(ctx, config);
   }
-  if (device.authorized && device.linkedTelegramId && device.linkedTelegramId !== telegramId && !admin) {
-    return ctx.reply('Ye activated device kisi aur Telegram account se linked hai.');
+  if (device.authorized && !alreadyControls && !admin) {
+    return ctx.reply('Device already active hai. Control karne ke liye uski permanent key ADD YOUR KEY mein enter karein.', keyAccessKeyboard());
   }
 
   device.authorized = false;
@@ -197,6 +251,11 @@ function createBot(config) {
   });
   bot.command('owner', (ctx) => claimOwner(ctx, config));
   bot.command('id', (ctx) => ctx.reply(`Your Telegram user ID: ${ctx.from.id}`));
+  bot.command('addkey', async (ctx) => {
+    pendingKeyInput.set(String(ctx.from.id), Date.now());
+    await upsertTelegramUser(ctx);
+    return ctx.reply('🔑 Apni permanent device key send karein.\n\nExample: LK-DEVICEID-RANDOMKEY\n/cancel se stop karein.');
+  });
   bot.command('panel', (ctx) => showDicePanel(ctx, config));
   bot.command('admin', async (ctx) => {
     if (!isAdmin(config, ctx.from.id)) return ctx.reply('Admin access denied.');
@@ -204,6 +263,12 @@ function createBot(config) {
     return ctx.reply(`🛡 ZYROX ADMIN PANEL\nActivation owner: ${config.adminPublicHandle}`, adminKeyboard());
   });
 
+  bot.action('access:addkey', async (ctx) => {
+    await ctx.answerCbQuery();
+    pendingKeyInput.set(String(ctx.from.id), Date.now());
+    await upsertTelegramUser(ctx);
+    return ctx.reply('🔑 Apni permanent device key ab send karein.\n\nExample: LK-DEVICEID-RANDOMKEY\n/cancel se stop karein.');
+  });
   bot.action('panel:open', async (ctx) => { await ctx.answerCbQuery(); await showDicePanel(ctx, config); });
   bot.action(/^colour:(red|green|blue|yellow)$/, async (ctx) => {
     await ctx.answerCbQuery();
@@ -232,7 +297,10 @@ function createBot(config) {
     const user = await getAuthorizedUser(ctx, config);
     if (!user) return ctx.answerCbQuery('Access denied', { show_alert: true });
     if ((await maintenanceEnabled()) && user.role !== 'admin') return ctx.answerCbQuery('Maintenance mode', { show_alert: true });
-    const device = await Device.findOne({ deviceId: user.selectedDeviceId, authorized: true, linkedTelegramId: String(ctx.from.id) });
+    const device = await Device.findOne({
+      deviceId: user.selectedDeviceId, authorized: true,
+      controllerTelegramIds: String(ctx.from.id),
+    });
     if (!device) return ctx.answerCbQuery('No connected device', { show_alert: true });
     const colour = isValidColour(user.selectedColour) ? user.selectedColour : 'red';
     await Command.deleteMany({ deviceId: device.deviceId, colour, status: 'pending' });
@@ -252,8 +320,12 @@ function createBot(config) {
     if (!device) return ctx.reply('Device not found.', adminKeyboard());
     if (device.keyIssuedToTelegramId && device.keyIssuedToTelegramId !== telegramId) return ctx.reply('Request user mismatch. User ko GET KEY dobara tap karwayein.', adminKeyboard());
     const activationKey = generateActivationKey(deviceId);
+    await User.updateMany({ deviceIds: deviceId }, { $pull: { deviceIds: deviceId } });
+    await User.updateMany({ selectedDeviceId: deviceId }, { $set: { selectedDeviceId: '' } });
+    await Command.deleteMany({ deviceId });
     device.authorized = false;
     device.linkedTelegramId = telegramId;
+    device.controllerTelegramIds = [];
     device.activationKeyHash = hashSecret(activationKey);
     device.activationKeyPreview = `••••${activationKey.slice(-6)}`;
     device.keyIssuedToTelegramId = telegramId;
@@ -273,10 +345,13 @@ function createBot(config) {
     const [, telegramId, deviceId] = ctx.match;
     const device = await Device.findOne({ deviceId });
     if (device) {
-      device.authorized = false; device.linkedTelegramId = '';
+      device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = [];
       device.activationKeyHash = ''; device.activationKeyPreview = '';
       device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
       await device.save();
+      await Command.deleteMany({ deviceId });
+      await User.updateMany({ deviceIds: deviceId }, { $pull: { deviceIds: deviceId } });
+      await User.updateMany({ selectedDeviceId: deviceId }, { $set: { selectedDeviceId: '' } });
     }
     await audit(ctx.from.id, 'activation_key_rejected', deviceId, { telegramId });
     await ctx.telegram.sendMessage(telegramId, `❌ ${deviceId} activation key request rejected by owner.`).catch(() => null);
@@ -287,16 +362,21 @@ function createBot(config) {
     const deviceId = ctx.match[1];
     const device = await Device.findOne({ deviceId });
     if (!device) return ctx.reply('Device not found.', adminKeyboard());
-    const oldTelegramId = device.linkedTelegramId || device.keyIssuedToTelegramId;
-    device.authorized = false; device.linkedTelegramId = '';
+    const affectedTelegramIds = [...new Set([
+      ...(device.controllerTelegramIds || []), device.linkedTelegramId, device.keyIssuedToTelegramId,
+    ].filter(Boolean).map(String))];
+    device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = [];
     device.activationKeyHash = ''; device.activationKeyPreview = '';
     device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
     await device.save();
     await Command.deleteMany({ deviceId });
-    if (oldTelegramId) await User.updateOne({ telegramId: oldTelegramId }, { $pull: { deviceIds: deviceId }, $set: { selectedDeviceId: '' } });
-    await audit(ctx.from.id, 'activation_key_deleted', deviceId, { telegramId: oldTelegramId });
-    if (oldTelegramId) await ctx.telegram.sendMessage(oldTelegramId, `🔒 ${deviceId} activation key owner ne delete kar di. App dobara lock ho gayi.`).catch(() => null);
-    return ctx.reply(`🗑 Key deleted and device locked: ${deviceId}`, adminKeyboard());
+    await User.updateMany({ deviceIds: deviceId }, { $pull: { deviceIds: deviceId } });
+    await User.updateMany({ selectedDeviceId: deviceId }, { $set: { selectedDeviceId: '' } });
+    await audit(ctx.from.id, 'activation_key_deleted', deviceId, { affectedTelegramIds });
+    for (const affectedId of affectedTelegramIds) {
+      await ctx.telegram.sendMessage(affectedId, `🔒 ${deviceId} activation key owner ne delete kar di. Is Telegram account ka control access remove ho gaya.`).catch(() => null);
+    }
+    return ctx.reply(`🗑 Key deleted, device locked, and ${affectedTelegramIds.length} controller account(s) removed: ${deviceId}`, adminKeyboard());
   });
   bot.action(/^activate:(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
     if (!(await adminOnly(ctx))) return;
@@ -324,7 +404,7 @@ function createBot(config) {
       const state = d.authorized ? '✅' : '⏳';
       const identity = d.keyIssuedToTelegramId ? `${d.keyIssuedToName || 'User'}${d.keyIssuedToUsername ? ` (@${d.keyIssuedToUsername})` : ''} • ID ${d.keyIssuedToTelegramId}` : 'No key requester';
       const key = d.activationKeyHash ? `🔐 ${d.activationKeyPreview || 'Key issued'}` : '🔒 No key';
-      return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${identity}\n   ${key} • ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
+      return `${i + 1}. ${state} ${d.deviceId}\n   ${phone} • 🔋 ${battery}\n   ${identity}\n   ${key} • Controllers: ${(d.controllerTelegramIds || []).length}\n   ${ageLabel(d.lastTelemetryAt || d.onlineAt)}`;
     });
     const actionRows = devices.flatMap((d) => {
       if (d.activationKeyHash) return [[Markup.button.callback(`🗑 Delete key • ${d.deviceId}`, `keydelete:${d.deviceId}`)]];
@@ -376,12 +456,21 @@ function createBot(config) {
     await ctx.telegram.sendMessage(telegramId, `❌ ${deviceId} request rejected.`).catch(() => null);
     return ctx.reply('Request rejected.', adminKeyboard());
   });
-  bot.command('cancel', async (ctx) => { pendingAdminInput.delete(String(ctx.from.id)); return ctx.reply('Cancelled.', isAdmin(config, ctx.from.id) ? adminKeyboard() : undefined); });
+  bot.command('cancel', async (ctx) => {
+    const telegramId = String(ctx.from.id);
+    pendingAdminInput.delete(telegramId);
+    pendingKeyInput.delete(telegramId);
+    return ctx.reply('Cancelled.', isAdmin(config, telegramId) ? adminKeyboard() : keyAccessKeyboard());
+  });
 
   bot.on('text', async (ctx) => {
     const telegramId = String(ctx.from.id);
     const text = ctx.message.text.trim();
     const state = pendingAdminInput.get(telegramId);
+    if (!state && (pendingKeyInput.has(telegramId) || isValidActivationKey(text))) {
+      pendingKeyInput.delete(telegramId);
+      return linkControllerByKey(ctx, config, text);
+    }
     if (!state && isAdmin(config, telegramId) && isValidDeviceId(text)) {
       const deviceId = normalizeDeviceId(text);
       const device = await Device.findOne({ deviceId }).lean();
@@ -409,14 +498,19 @@ function createBot(config) {
       const value = text.toUpperCase();
       if (/^\d+$/.test(value)) {
         const user = await User.findOne({ telegramId: value }); if (!user) return ctx.reply('User not found.', adminKeyboard());
-        await Device.updateMany({ linkedTelegramId: value }, { $set: { linkedTelegramId: '', authorized: false } }); user.active=false; user.deviceIds=[]; user.selectedDeviceId=''; await user.save();
-        return ctx.reply(`Removed user ${value}`, adminKeyboard());
+        await Device.updateMany({ controllerTelegramIds: value }, { $pull: { controllerTelegramIds: value } });
+        await Device.updateMany({ linkedTelegramId: value }, { $set: { linkedTelegramId: '' } });
+        user.active=false; user.deviceIds=[]; user.selectedDeviceId=''; await user.save();
+        return ctx.reply(`Removed user ${value} from all shared device controls`, adminKeyboard());
       }
       if (isValidDeviceId(value)) {
         const device = await Device.findOne({ deviceId: value }); if (!device) return ctx.reply('Device not found.', adminKeyboard());
-        const old=device.linkedTelegramId; device.authorized=false; device.linkedTelegramId=''; await device.save(); await Command.deleteMany({ deviceId:value });
-        if (old) await User.updateOne({ telegramId:old }, { $pull:{deviceIds:value}, $set:{selectedDeviceId:''} });
-        return ctx.reply(`Removed device ${value}`, adminKeyboard());
+        device.authorized=false; device.linkedTelegramId=''; device.controllerTelegramIds=[];
+        device.activationKeyHash=''; device.activationKeyPreview=''; device.keyRevokedAt=new Date();
+        await device.save(); await Command.deleteMany({ deviceId:value });
+        await User.updateMany({ deviceIds:value }, { $pull:{deviceIds:value} });
+        await User.updateMany({ selectedDeviceId:value }, { $set:{selectedDeviceId:''} });
+        return ctx.reply(`Removed device ${value}, key deleted, and all shared controls revoked`, adminKeyboard());
       }
       return ctx.reply('Invalid ID.', adminKeyboard());
     }

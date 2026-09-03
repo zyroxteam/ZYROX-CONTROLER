@@ -27,6 +27,9 @@ test('device-bound activation keys', () => {
   assert.equal(activationKeyMatchesDevice(key, 'ZRX-ZZ12CD34EF56'), false);
   assert.equal(normalizeActivationKey(` ${key.toLowerCase()} `), key);
   assert.notEqual(generateActivationKey(deviceId), key);
+  const sharedExample = 'LK-GTCYEUS9XLC2-TCMKVRJUTCNU7BVRF5WXLZDR';
+  assert.equal(isValidActivationKey(sharedExample), true);
+  assert.equal(activationKeyMatchesDevice(sharedExample, 'ZRX-GTCYEUS9XLC2'), true);
 });
 test('colours', () => {
   for (const c of ['red', 'green', 'blue', 'yellow']) assert.equal(isValidColour(c), true);

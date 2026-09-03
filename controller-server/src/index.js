@@ -38,6 +38,10 @@ function applyTelemetry(device, input) {
   return wasBackgroundOffline;
 }
 
+function deviceHasControllers(device) {
+  return Array.isArray(device.controllerTelegramIds) && device.controllerTelegramIds.length > 0;
+}
+
 function deviceStatusText(device) {
   const phone = [device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown model';
   const battery = device.batteryLevel >= 0 ? `${device.batteryLevel}%${device.charging ? ' • Charging ⚡' : ''}` : 'Unknown';
@@ -70,6 +74,20 @@ async function bootstrap() {
     await Setting.findOneAndUpdate({ key: 'device_key_mode_version' }, { value: 1 }, { upsert: true });
     console.log('Device-bound key mode initialized; legacy approvals cleared');
   }
+  const sharingMode = await Setting.findOne({ key: 'shared_key_mode_version' }).lean();
+  if (Number(sharingMode?.value || 0) < 1) {
+    const legacyDevices = await Device.find({ linkedTelegramId: { $ne: '' } }).select('deviceId linkedTelegramId').lean();
+    if (legacyDevices.length) {
+      await Device.bulkWrite(legacyDevices.map((device) => ({
+        updateOne: {
+          filter: { deviceId: device.deviceId },
+          update: { $addToSet: { controllerTelegramIds: String(device.linkedTelegramId) } },
+        },
+      })));
+    }
+    await Setting.findOneAndUpdate({ key: 'shared_key_mode_version' }, { value: 1 }, { upsert: true });
+    console.log(`Shared-key controller mode initialized; migrated ${legacyDevices.length} device(s)`);
+  }
   const savedOwner = await Setting.findOne({ key: 'owner_chat_id' }).lean();
   if (savedOwner?.value && /^\d+$/.test(String(savedOwner.value))) {
     config.ownerChatId = String(savedOwner.value);
@@ -85,6 +103,13 @@ async function bootstrap() {
 
   const bot = createBot(config);
   botUsername = (await bot.telegram.getMe()).username;
+  await bot.telegram.setMyCommands([
+    { command: 'start', description: 'Open bot menu' },
+    { command: 'addkey', description: 'Add your permanent device key' },
+    { command: 'panel', description: 'Open colour dice controls' },
+    { command: 'id', description: 'Show your Telegram user ID' },
+    { command: 'admin', description: 'Open owner/admin panel' },
+  ]);
   async function notifyAdmins(title, device, withApproval) {
     let sent = 0;
     const options = withApproval ? { reply_markup: { inline_keyboard: [[{ text: '✅ APPROVE & ACTIVATE', callback_data: `activate:${device.deviceId}` }]] } } : {};
@@ -125,7 +150,7 @@ async function bootstrap() {
   app.get('/', (_req, res) => res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZYROX CONTROLER</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#342060,#0d0a18 55%);font:16px system-ui;color:#f4efff}.card{width:min(92vw,560px);padding:38px;border:1px solid #6d4ca4;border-radius:24px;background:#171126;box-shadow:0 24px 80px #0008}.brand{font-size:12px;letter-spacing:.24em;color:#ae8cff}.title{font-size:34px;font-weight:800;margin:10px 0}.row{display:flex;gap:10px;flex-wrap:wrap;margin:25px 0}.chip{padding:10px 13px;background:#261b3d;border-radius:12px}.status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:#201735}.dot{width:10px;height:10px;border-radius:50%;background:#41dd91;box-shadow:0 0 18px #41dd91}.muted{color:#b7aacd;line-height:1.5}</style></head><body><main class="card"><div class="brand">ZYROX SYSTEMS</div><div class="title">COLOUR DICE CONTROL</div><p class="muted">Telegram controlled Red, Green, Blue and Yellow dice commands with Device ID activation.</p><div class="row"><span class="chip">🔴 RED</span><span class="chip">🟢 GREEN</span><span class="chip">🔵 BLUE</span><span class="chip">🟡 YELLOW</span></div><div class="status"><span class="dot"></span><strong>Service online</strong></div></main></body></html>`));
 
   app.get('/health', asyncRoute(async (_req, res) => res.json({
-    ok: true, service: 'zyrox-colour-dice-controler', version: '1.3.1', bot: `@${botUsername}`, botMode: config.botMode,
+    ok: true, service: 'zyrox-colour-dice-controler', version: '1.4.0', bot: `@${botUsername}`, botMode: config.botMode,
     activationOwner: config.adminPublicHandle, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), startedAt,
   })));
@@ -149,7 +174,7 @@ async function bootstrap() {
       device.lastOnlineNoticeAt = new Date();
       await device.save();
     }
-    return res.json({ ok: true, deviceId, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${deviceId}` });
+    return res.json({ ok: true, deviceId, authorized: device.authorized, linked: deviceHasControllers(device), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${deviceId}` });
   }));
 
   const keyActivationLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
@@ -163,6 +188,7 @@ async function bootstrap() {
     device.keyActivatedAt = new Date();
     device.keyRevokedAt = null;
     device.onlineAt = new Date();
+    device.controllerTelegramIds = [...new Set([...(device.controllerTelegramIds || []), String(device.linkedTelegramId)])];
     await device.save();
     await User.findOneAndUpdate(
       { telegramId: device.linkedTelegramId },
@@ -179,7 +205,7 @@ async function bootstrap() {
 
   app.get('/api/v1/devices/:deviceId/status', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
     const device = req.zyroxDevice; device.onlineAt = new Date(); await device.save();
-    return res.json({ ok: true, deviceId: device.deviceId, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
+    return res.json({ ok: true, deviceId: device.deviceId, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
   }));
 
   app.post('/api/v1/devices/:deviceId/heartbeat', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
@@ -190,13 +216,13 @@ async function bootstrap() {
       device.lastOnlineNoticeAt = new Date();
     }
     await device.save();
-    return res.json({ ok: true, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
+    return res.json({ ok: true, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
   }));
 
   app.get('/api/v1/devices/:deviceId/next-command', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
     const device = req.zyroxDevice; device.onlineAt = new Date(); await device.save();
     const maintenance = Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
-    if (!device.authorized || !device.linkedTelegramId || maintenance) return res.json({ ok: true, authorized: device.authorized, linked: Boolean(device.linkedTelegramId), maintenance, command: null });
+    if (!device.authorized || !deviceHasControllers(device) || maintenance) return res.json({ ok: true, authorized: device.authorized, linked: deviceHasControllers(device), maintenance, command: null });
     const command = await Command.findOneAndUpdate({ deviceId: device.deviceId, status: 'pending', expiresAt: { $gt: new Date() } }, { $set: { status: 'delivered', deliveredAt: new Date() } }, { sort: { createdAt: 1 }, new: true });
     return res.json({ ok: true, authorized: true, linked: true, maintenance: false, command: command ? { id: String(command._id), colour: command.colour, dice: command.dice, createdAt: command.createdAt } : null });
   }));

@@ -31,6 +31,10 @@ A command only applies when the selected colour's next turn is rolled. Other col
 6. The user pastes that key into the app popup once. Home and gameplay remain locked until the authenticated server verifies the key for that exact device and Telegram requester.
 7. The activation remains valid for that installation until the owner taps **DELETE KEY**. Deletion revokes the device, removes its pending commands and redirects any open Home/game session back to the key popup after a successful status check.
 8. After activation, long-pressing the in-game dice opens the Telegram control shortcut. The linked user selects Red/Green/Blue/Yellow and then `6 5 4 3 2 1`; the command applies only to the selected colour's next roll.
+9. The permanent key is also a shareable controller credential. On any trusted Telegram account, start the bot, press **ADD YOUR KEY** (or send `/addkey`), and paste the key. That account is added as another controller for the same active device without changing the phone installation.
+10. Multiple trusted Telegram accounts can control one device. Deleting the key removes every linked controller, clears pending commands and locks the app.
+
+Treat the permanent key like a password: anyone who has it can control that device until the owner deletes or rotates it.
 
 No location, contacts, files, IMEI, serial number or phone number are collected. Telegram bots cannot initiate a private chat by username, so the one-time user/owner Start action cannot be removed.
 
