@@ -6,6 +6,7 @@ Android Ludo clone with a secure Telegram colour-specific dice controller, Devic
 
 - API: `https://zyrox-shield.antideploy.com`
 - Health: `https://zyrox-shield.antideploy.com/health`
+- Telegram bot: `@ZyroxLudoKingbot`
 - Android package: `com.ludo.king`
 
 ## Colour control
