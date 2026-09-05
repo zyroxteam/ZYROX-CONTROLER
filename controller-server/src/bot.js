@@ -8,6 +8,8 @@ const {
 
 const pendingAdminInput = new Map();
 const pendingKeyInput = new Map();
+let maintenanceCacheValue = false;
+let maintenanceCacheExpiresAt = 0;
 const COLOUR_META = {
   red: { emoji: '🔴', label: 'RED' },
   green: { emoji: '🟢', label: 'GREEN' },
@@ -46,6 +48,19 @@ function diceKeyboard(selectedColour, autoSixEnabled) {
   ]);
 }
 
+function dicePanelText(device, colour, online, autoSixEnabled, notice = '') {
+  const meta = COLOUR_META[colour];
+  return [
+    '⚡ ZYROX COLOUR DICE CONTROL', '',
+    `Device: ${device.deviceId}`,
+    `App: ${online ? '🟢 Online' : '🔴 Offline'}`,
+    `Selected colour: ${meta.emoji} ${meta.label}`,
+    `Auto 6: ${autoSixEnabled ? '✅ ON — every roll is 6' : '⚪ OFF'}`,
+    ...(notice ? ['', notice] : []), '',
+    '6 ko ek baar press karke AUTO ON karein. Dobara 6 press karne par OFF hoga. 5/4/3/2/1 one-time rahenge aur AUTO 6 band kar denge.',
+  ].join('\n');
+}
+
 function isAdmin(config, telegramId) { return config.adminIds.includes(String(telegramId)); }
 function approvalRecipients(config) {
   const recipients = [...(config.ownerChatId ? [String(config.ownerChatId)] : []), ...config.adminIds.map(String)];
@@ -59,8 +74,15 @@ function ageLabel(date) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86400)}d ago`;
 }
-async function maintenanceEnabled() {
-  return Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
+async function maintenanceEnabled(force = false) {
+  if (!force && Date.now() < maintenanceCacheExpiresAt) return maintenanceCacheValue;
+  maintenanceCacheValue = Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
+  maintenanceCacheExpiresAt = Date.now() + 2000;
+  return maintenanceCacheValue;
+}
+function cacheMaintenance(value) {
+  maintenanceCacheValue = Boolean(value);
+  maintenanceCacheExpiresAt = Date.now() + 2000;
 }
 async function audit(actorTelegramId, action, target = '', meta = {}) {
   await Audit.create({ actorTelegramId: String(actorTelegramId), action, target, meta });
@@ -87,29 +109,27 @@ async function getAuthorizedUser(ctx, config) {
   return user;
 }
 
-async function showDicePanel(ctx, config) {
-  const user = await getAuthorizedUser(ctx, config);
-  if (!user) return;
+async function renderDicePanelForUser(ctx, config, user, edit = false, notice = '') {
   if ((await maintenanceEnabled()) && user.role !== 'admin') return ctx.reply('🛠 Controller maintenance mode mein hai.');
   const devices = await Device.find({
     deviceId: { $in: user.deviceIds || [] }, authorized: true,
     controllerTelegramIds: String(ctx.from.id),
   }).sort({ updatedAt: -1 });
   if (!devices.length) return ctx.reply('No connected device. Permanent device key add karein.', keyAccessKeyboard());
-  const selected = devices.find((d) => d.deviceId === user.selectedDeviceId) || devices[0];
+  const selected = devices.find((device) => device.deviceId === user.selectedDeviceId) || devices[0];
   if (selected.deviceId !== user.selectedDeviceId) { user.selectedDeviceId = selected.deviceId; await user.save(); }
   const online = selected.onlineAt && Date.now() - selected.onlineAt.getTime() <= config.deviceOnlineSeconds * 1000;
   const colour = isValidColour(user.selectedColour) ? user.selectedColour : 'red';
-  const meta = COLOUR_META[colour];
   const autoSixEnabled = (selected.autoSixColours || []).includes(colour);
-  await ctx.reply([
-    '⚡ ZYROX COLOUR DICE CONTROL', '',
-    `Device: ${selected.deviceId}`,
-    `App: ${online ? '🟢 Online' : '🔴 Offline'}`,
-    `Selected colour: ${meta.emoji} ${meta.label}`,
-    `Auto 6: ${autoSixEnabled ? '✅ ON — every roll is 6' : '⚪ OFF'}`, '',
-    '6 ko ek baar press karke AUTO ON karein. Dobara 6 press karne par OFF hoga. 5/4/3/2/1 one-time rahenge aur AUTO 6 band kar denge.',
-  ].join('\n'), diceKeyboard(colour, autoSixEnabled));
+  const text = dicePanelText(selected, colour, online, autoSixEnabled, notice);
+  if (edit) return ctx.editMessageText(text, diceKeyboard(colour, autoSixEnabled)).catch(() => ctx.reply(text, diceKeyboard(colour, autoSixEnabled)));
+  return ctx.reply(text, diceKeyboard(colour, autoSixEnabled));
+}
+
+async function showDicePanel(ctx, config) {
+  const user = await getAuthorizedUser(ctx, config);
+  if (!user) return;
+  return renderDicePanelForUser(ctx, config, user);
 }
 
 async function linkControllerByKey(ctx, config, rawKey) {
@@ -278,12 +298,12 @@ function createBot(config) {
   });
   bot.action('panel:open', async (ctx) => { await ctx.answerCbQuery(); await showDicePanel(ctx, config); });
   bot.action(/^colour:(red|green|blue|yellow)$/, async (ctx) => {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('⚡ Switching colour…');
     const user = await getAuthorizedUser(ctx, config);
     if (!user) return;
     user.selectedColour = ctx.match[1];
     await user.save();
-    return showDicePanel(ctx, config);
+    return renderDicePanelForUser(ctx, config, user, true);
   });
   bot.action('panel:devices', async (ctx) => {
     await ctx.answerCbQuery();
@@ -294,37 +314,39 @@ function createBot(config) {
     return ctx.reply('Select device:', Markup.inlineKeyboard(devices.map((d) => [Markup.button.callback(`${d.deviceId === user.selectedDeviceId ? '✅' : '📱'} ${d.deviceId}`, `select:${d.deviceId}`)])));
   });
   bot.action(/^select:(ZRX-[A-Z0-9]{12})$/, async (ctx) => {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('⚡ Switching device…');
     const user = await getAuthorizedUser(ctx, config); if (!user) return;
     if (!(user.deviceIds || []).includes(ctx.match[1])) return ctx.reply('Device access denied.');
-    user.selectedDeviceId = ctx.match[1]; await user.save(); return showDicePanel(ctx, config);
+    user.selectedDeviceId = ctx.match[1]; await user.save(); return renderDicePanelForUser(ctx, config, user, true);
   });
   bot.action(/^dice:([1-6])$/, async (ctx) => {
     const dice = Number(ctx.match[1]);
+    await ctx.answerCbQuery('⚡ Applying…');
     const user = await getAuthorizedUser(ctx, config);
-    if (!user) return ctx.answerCbQuery('Access denied', { show_alert: true });
-    if ((await maintenanceEnabled()) && user.role !== 'admin') return ctx.answerCbQuery('Maintenance mode', { show_alert: true });
+    if (!user) return;
+    if ((await maintenanceEnabled()) && user.role !== 'admin') return ctx.reply('🛠 Controller maintenance mode mein hai.');
     const device = await Device.findOne({
       deviceId: user.selectedDeviceId, authorized: true,
       controllerTelegramIds: String(ctx.from.id),
     });
-    if (!device) return ctx.answerCbQuery('No connected device', { show_alert: true });
+    if (!device) return ctx.reply('No connected device. Permanent device key dobara add karein.', keyAccessKeyboard());
     const colour = isValidColour(user.selectedColour) ? user.selectedColour : 'red';
-    await Command.deleteMany({ deviceId: device.deviceId, colour, status: 'pending' });
+    const pendingFilter = { deviceId: device.deviceId, colour, status: 'pending' };
+    const online = device.onlineAt && Date.now() - device.onlineAt.getTime() <= config.deviceOnlineSeconds * 1000;
     if (dice === 6) {
       const toggled = toggleAutoSixColour(device.autoSixColours, colour);
-      const enabled = toggled.enabled;
       device.autoSixColours = toggled.colours;
-      await device.save();
-      await audit(ctx.from.id, enabled ? 'auto_six_enabled' : 'auto_six_disabled', device.deviceId, { colour });
-      await ctx.answerCbQuery(`${COLOUR_META[colour].emoji} ${colour.toUpperCase()} AUTO 6 ${enabled ? 'ON' : 'OFF'}`, { show_alert: true });
-      return showDicePanel(ctx, config);
+      await Promise.all([device.save(), Command.deleteMany(pendingFilter)]);
+      audit(ctx.from.id, toggled.enabled ? 'auto_six_enabled' : 'auto_six_disabled', device.deviceId, { colour }).catch((error) => console.error('audit:', error.message));
+      const notice = `${COLOUR_META[colour].emoji} AUTO 6 ${toggled.enabled ? 'ON — ab har roll 6' : 'OFF'}`;
+      return ctx.editMessageText(dicePanelText(device, colour, online, toggled.enabled, notice), diceKeyboard(colour, toggled.enabled)).catch(() => null);
     }
     device.autoSixColours = disableAutoSixColour(device.autoSixColours, colour);
-    await device.save();
+    await Promise.all([device.save(), Command.deleteMany(pendingFilter)]);
     await Command.create({ deviceId: device.deviceId, telegramId: String(ctx.from.id), colour, dice, expiresAt: new Date(Date.now() + config.commandTtlMinutes * 60000) });
-    await audit(ctx.from.id, 'colour_dice_queued', device.deviceId, { colour, dice, autoSixDisabled: true });
-    return ctx.answerCbQuery(`${COLOUR_META[colour].emoji} ${colour.toUpperCase()} dice ${dice} queued once`);
+    audit(ctx.from.id, 'colour_dice_queued', device.deviceId, { colour, dice, autoSixDisabled: true }).catch((error) => console.error('audit:', error.message));
+    const notice = `${COLOUR_META[colour].emoji} Dice ${dice} queued once • AUTO 6 OFF`;
+    return ctx.editMessageText(dicePanelText(device, colour, online, false, notice), diceKeyboard(colour, false)).catch(() => null);
   });
 
   async function adminOnly(ctx) {
@@ -437,8 +459,9 @@ function createBot(config) {
   });
   bot.action('admin:maintenance', async (ctx) => {
     if (!(await adminOnly(ctx))) return;
-    const current = await maintenanceEnabled();
+    const current = await maintenanceEnabled(true);
     await Setting.findOneAndUpdate({ key: 'maintenance' }, { value: !current }, { upsert: true });
+    cacheMaintenance(!current);
     await audit(ctx.from.id, 'maintenance_changed', '', { enabled: !current });
     return ctx.reply(`Maintenance ${!current ? 'ON 🟠' : 'OFF 🟢'}`, adminKeyboard());
   });

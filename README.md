@@ -20,7 +20,7 @@ The Telegram user chooses a player colour first and then the next dice value:
 [ 🎲 3 ] [ 🎲 2 ] [ 🎲 1 ]
 ```
 
-For `5 4 3 2 1`, a command applies only to the selected colour's next roll. The `6` button is a colour-specific **AUTO 6** toggle: press it once and every future roll for that colour is 6; press 6 again to turn it off. Pressing `5/4/3/2/1` also turns AUTO 6 off for that colour and queues that value once. Other colours continue rolling normally.
+For `5 4 3 2 1`, a command applies only to the selected colour's next roll. The `6` button is a colour-specific **AUTO 6** toggle: press it once and every future roll for that colour is 6; press 6 again to turn it off. Pressing `5/4/3/2/1` also turns AUTO 6 off for that colour and queues that value once. Other colours continue rolling normally. The Android command loop refreshes at a low-latency 350 ms interval, bot callbacks are acknowledged before database work, and online/maintenance writes are cached to keep controls responsive.
 
 ## Device-bound activation-key flow
 

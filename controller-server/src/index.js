@@ -12,6 +12,9 @@ const { hashSecret, safeEqualHex, normalizeDeviceId, isValidDeviceId, isValidDev
 const config = loadConfig();
 const startedAt = new Date();
 let botUsername = '';
+let maintenanceCacheValue = false;
+let maintenanceCacheExpiresAt = 0;
+const onlineWriteAt = new Map();
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
 function cleanText(value, max = 80) {
@@ -58,10 +61,30 @@ async function authenticateDevice(req, res, next) {
   return next();
 }
 
+async function maintenanceEnabledCached(force = false) {
+  if (!force && Date.now() < maintenanceCacheExpiresAt) return maintenanceCacheValue;
+  maintenanceCacheValue = Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
+  maintenanceCacheExpiresAt = Date.now() + 2000;
+  return maintenanceCacheValue;
+}
+
+function touchDeviceOnline(device) {
+  const now = Date.now();
+  device.onlineAt = new Date(now);
+  const key = String(device.deviceId);
+  if (now - (onlineWriteAt.get(key) || 0) < 5000) return;
+  onlineWriteAt.set(key, now);
+  Device.updateOne({ _id: device._id }, { $set: { onlineAt: device.onlineAt } }).catch((error) => console.error('online touch:', error.message));
+  if (onlineWriteAt.size > 5000) {
+    for (const [deviceId, timestamp] of onlineWriteAt) if (now - timestamp > 60000) onlineWriteAt.delete(deviceId);
+  }
+}
+
 async function bootstrap() {
   await mongoose.connect(config.mongoUri, { dbName: config.mongoDb, serverSelectionTimeoutMS: 15000 });
   console.log(`MongoDB connected (database: ${config.mongoDb})`);
   await Setting.findOneAndUpdate({ key: 'maintenance' }, { $setOnInsert: { value: false } }, { upsert: true });
+  await maintenanceEnabledCached(true);
   const keyMode = await Setting.findOne({ key: 'device_key_mode_version' }).lean();
   if (Number(keyMode?.value || 0) < 1) {
     await Device.updateMany({}, { $set: {
@@ -135,7 +158,7 @@ async function bootstrap() {
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cors({ origin: false }));
   app.use(express.json({ limit: '32kb' }));
-  app.use(rateLimit({ windowMs: 60000, limit: 600, standardHeaders: 'draft-7', legacyHeaders: false }));
+  app.use(rateLimit({ windowMs: 60000, limit: 3000, standardHeaders: 'draft-7', legacyHeaders: false }));
 
   if (config.botMode === 'webhook') {
     if (!config.publicBaseUrl.startsWith('https://')) throw new Error('PUBLIC_BASE_URL must be HTTPS in webhook mode');
@@ -156,9 +179,9 @@ async function bootstrap() {
   app.get('/', (_req, res) => res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZYROX CONTROLER</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#342060,#0d0a18 55%);font:16px system-ui;color:#f4efff}.card{width:min(92vw,560px);padding:38px;border:1px solid #6d4ca4;border-radius:24px;background:#171126;box-shadow:0 24px 80px #0008}.brand{font-size:12px;letter-spacing:.24em;color:#ae8cff}.title{font-size:34px;font-weight:800;margin:10px 0}.row{display:flex;gap:10px;flex-wrap:wrap;margin:25px 0}.chip{padding:10px 13px;background:#261b3d;border-radius:12px}.status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:#201735}.dot{width:10px;height:10px;border-radius:50%;background:#41dd91;box-shadow:0 0 18px #41dd91}.muted{color:#b7aacd;line-height:1.5}</style></head><body><main class="card"><div class="brand">ZYROX SYSTEMS</div><div class="title">COLOUR DICE CONTROL</div><p class="muted">Telegram controlled Red, Green, Blue and Yellow dice commands with Device ID activation.</p><div class="row"><span class="chip">🔴 RED</span><span class="chip">🟢 GREEN</span><span class="chip">🔵 BLUE</span><span class="chip">🟡 YELLOW</span></div><div class="status"><span class="dot"></span><strong>Service online</strong></div></main></body></html>`));
 
   app.get('/health', asyncRoute(async (_req, res) => res.json({
-    ok: true, service: 'zyrox-colour-dice-controler', version: '1.5.0', bot: `@${botUsername}`, botMode: config.botMode,
+    ok: true, service: 'zyrox-colour-dice-controler', version: '1.5.1', bot: `@${botUsername}`, botMode: config.botMode,
     activationOwner: config.adminPublicHandle, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), startedAt,
+    maintenance: await maintenanceEnabledCached(), startedAt,
   })));
 
   app.post('/api/v1/devices/register', asyncRoute(async (req, res) => {
@@ -210,8 +233,8 @@ async function bootstrap() {
   }));
 
   app.get('/api/v1/devices/:deviceId/status', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
-    const device = req.zyroxDevice; device.onlineAt = new Date(); await device.save();
-    return res.json({ ok: true, deviceId: device.deviceId, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
+    const device = req.zyroxDevice; touchDeviceOnline(device);
+    return res.json({ ok: true, deviceId: device.deviceId, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: await maintenanceEnabledCached(), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
   }));
 
   app.post('/api/v1/devices/:deviceId/heartbeat', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
@@ -222,12 +245,12 @@ async function bootstrap() {
       device.lastOnlineNoticeAt = new Date();
     }
     await device.save();
-    return res.json({ ok: true, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
+    return res.json({ ok: true, authorized: device.authorized, linked: deviceHasControllers(device), maintenance: await maintenanceEnabledCached(), activationOwner: config.adminPublicHandle, botUsername, botLink: `https://t.me/${botUsername}?start=${device.deviceId}` });
   }));
 
   app.get('/api/v1/devices/:deviceId/next-command', asyncRoute(authenticateDevice), asyncRoute(async (req, res) => {
-    const device = req.zyroxDevice; device.onlineAt = new Date(); await device.save();
-    const maintenance = Boolean((await Setting.findOne({ key: 'maintenance' }).lean())?.value);
+    const device = req.zyroxDevice; touchDeviceOnline(device);
+    const maintenance = await maintenanceEnabledCached();
     const autoSixColours = (device.autoSixColours || []).filter((colour) => ['red', 'green', 'blue', 'yellow'].includes(colour));
     if (!device.authorized || !deviceHasControllers(device) || maintenance) return res.json({ ok: true, authorized: device.authorized, linked: deviceHasControllers(device), maintenance, autoSixColours: [], command: null });
     const command = await Command.findOneAndUpdate({ deviceId: device.deviceId, status: 'pending', expiresAt: { $gt: new Date() } }, { $set: { status: 'delivered', deliveredAt: new Date() } }, { sort: { createdAt: 1 }, new: true });
