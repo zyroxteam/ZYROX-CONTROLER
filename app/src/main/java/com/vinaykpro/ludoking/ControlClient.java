@@ -79,7 +79,7 @@ public final class ControlClient {
     }
     public synchronized void start(){
         if(!TelemetryPrivacy.isAllowed(appContext)) return;
-        if(pollingTask==null||pollingTask.isCancelled()) pollingTask=executor.scheduleWithFixedDelay(this::pollSafely,0,350,TimeUnit.MILLISECONDS);
+        if(pollingTask==null||pollingTask.isCancelled()) pollingTask=executor.scheduleAtFixedRate(this::pollSafely,0,350,TimeUnit.MILLISECONDS);
     }
     public synchronized void stop(){ if(pollingTask!=null){pollingTask.cancel(false); pollingTask=null;} }
     public void register(Callback callback){
