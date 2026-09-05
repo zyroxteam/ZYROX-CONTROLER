@@ -28,6 +28,18 @@ function generateActivationKey(deviceId) {
   return `LK-${normalizedDeviceId.slice(4)}-${randomPart}`;
 }
 function isValidColour(value) { return COLOURS.includes(String(value || '').toLowerCase()); }
+function toggleAutoSixColour(values, colour) {
+  const normalized = String(colour || '').toLowerCase();
+  if (!isValidColour(normalized)) throw new Error('invalid_colour');
+  const set = new Set((Array.isArray(values) ? values : []).filter(isValidColour));
+  const enabled = !set.has(normalized);
+  if (enabled) set.add(normalized); else set.delete(normalized);
+  return { enabled, colours: [...set] };
+}
+function disableAutoSixColour(values, colour) {
+  const normalized = String(colour || '').toLowerCase();
+  return (Array.isArray(values) ? values : []).filter((value) => isValidColour(value) && value !== normalized);
+}
 function userLabel(from = {}) {
   return [from.first_name, from.last_name].filter(Boolean).join(' ').trim() || from.username || String(from.id || 'Unknown');
 }
@@ -35,5 +47,5 @@ function userLabel(from = {}) {
 module.exports = {
   COLOURS, hashSecret, safeEqualHex, normalizeDeviceId, isValidDeviceId, isValidDeviceSecret,
   normalizeActivationKey, isValidActivationKey, activationKeyMatchesDevice, generateActivationKey,
-  isValidColour, userLabel,
+  isValidColour, toggleAutoSixColour, disableAutoSixColour, userLabel,
 };

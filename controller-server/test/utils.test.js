@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {
   hashSecret, safeEqualHex, normalizeDeviceId, isValidDeviceId, isValidDeviceSecret,
   normalizeActivationKey, isValidActivationKey, activationKeyMatchesDevice, generateActivationKey,
-  isValidColour,
+  isValidColour, toggleAutoSixColour, disableAutoSixColour,
 } = require('../src/utils');
 
 test('device IDs', () => {
@@ -31,7 +31,15 @@ test('device-bound activation keys', () => {
   assert.equal(isValidActivationKey(sharedExample), true);
   assert.equal(activationKeyMatchesDevice(sharedExample, 'ZRX-GTCYEUS9XLC2'), true);
 });
-test('colours', () => {
+test('colours and persistent auto six', () => {
   for (const c of ['red', 'green', 'blue', 'yellow']) assert.equal(isValidColour(c), true);
   assert.equal(isValidColour('purple'), false);
+  const on = toggleAutoSixColour([], 'red');
+  assert.deepEqual(on, { enabled: true, colours: ['red'] });
+  const keepsOtherColour = toggleAutoSixColour(on.colours, 'blue');
+  assert.deepEqual(new Set(keepsOtherColour.colours), new Set(['red', 'blue']));
+  const off = toggleAutoSixColour(keepsOtherColour.colours, 'red');
+  assert.equal(off.enabled, false);
+  assert.deepEqual(off.colours, ['blue']);
+  assert.deepEqual(disableAutoSixColour(['red', 'blue'], 'blue'), ['red']);
 });

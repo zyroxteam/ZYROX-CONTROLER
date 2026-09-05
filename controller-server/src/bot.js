@@ -3,6 +3,7 @@ const { User, Device, Command, Setting, Audit } = require('./models');
 const {
   isValidDeviceId, normalizeDeviceId, userLabel, isValidColour, generateActivationKey, hashSecret,
   normalizeActivationKey, isValidActivationKey, activationKeyMatchesDevice,
+  toggleAutoSixColour, disableAutoSixColour,
 } = require('./utils');
 
 const pendingAdminInput = new Map();
@@ -31,11 +32,15 @@ function keyAccessKeyboard() {
   ]);
 }
 
-function diceKeyboard(selectedColour) {
+function diceKeyboard(selectedColour, autoSixEnabled) {
   return Markup.inlineKeyboard([
     ['red', 'green'].map((c) => Markup.button.callback(`${c === selectedColour ? '✅' : COLOUR_META[c].emoji} ${COLOUR_META[c].label}`, `colour:${c}`)),
     ['blue', 'yellow'].map((c) => Markup.button.callback(`${c === selectedColour ? '✅' : COLOUR_META[c].emoji} ${COLOUR_META[c].label}`, `colour:${c}`)),
-    [6, 5, 4].map((n) => Markup.button.callback(`🎲 ${n}`, `dice:${n}`)),
+    [
+      Markup.button.callback(autoSixEnabled ? '✅ ♾ 6 AUTO ON' : '♾ 6 AUTO', 'dice:6'),
+      Markup.button.callback('🎲 5', 'dice:5'),
+      Markup.button.callback('🎲 4', 'dice:4'),
+    ],
     [3, 2, 1].map((n) => Markup.button.callback(`🎲 ${n}`, `dice:${n}`)),
     [Markup.button.callback('🔄 Refresh', 'panel:open'), Markup.button.callback('📱 Devices', 'panel:devices')],
   ]);
@@ -96,13 +101,15 @@ async function showDicePanel(ctx, config) {
   const online = selected.onlineAt && Date.now() - selected.onlineAt.getTime() <= config.deviceOnlineSeconds * 1000;
   const colour = isValidColour(user.selectedColour) ? user.selectedColour : 'red';
   const meta = COLOUR_META[colour];
+  const autoSixEnabled = (selected.autoSixColours || []).includes(colour);
   await ctx.reply([
     '⚡ ZYROX COLOUR DICE CONTROL', '',
     `Device: ${selected.deviceId}`,
     `App: ${online ? '🟢 Online' : '🔴 Offline'}`,
-    `Selected colour: ${meta.emoji} ${meta.label}`, '',
-    'Pehle colour select karein, phir next dice value:',
-  ].join('\n'), diceKeyboard(colour));
+    `Selected colour: ${meta.emoji} ${meta.label}`,
+    `Auto 6: ${autoSixEnabled ? '✅ ON — every roll is 6' : '⚪ OFF'}`, '',
+    '6 ko ek baar press karke AUTO ON karein. Dobara 6 press karne par OFF hoga. 5/4/3/2/1 one-time rahenge aur AUTO 6 band kar denge.',
+  ].join('\n'), diceKeyboard(colour, autoSixEnabled));
 }
 
 async function linkControllerByKey(ctx, config, rawKey) {
@@ -304,9 +311,20 @@ function createBot(config) {
     if (!device) return ctx.answerCbQuery('No connected device', { show_alert: true });
     const colour = isValidColour(user.selectedColour) ? user.selectedColour : 'red';
     await Command.deleteMany({ deviceId: device.deviceId, colour, status: 'pending' });
+    if (dice === 6) {
+      const toggled = toggleAutoSixColour(device.autoSixColours, colour);
+      const enabled = toggled.enabled;
+      device.autoSixColours = toggled.colours;
+      await device.save();
+      await audit(ctx.from.id, enabled ? 'auto_six_enabled' : 'auto_six_disabled', device.deviceId, { colour });
+      await ctx.answerCbQuery(`${COLOUR_META[colour].emoji} ${colour.toUpperCase()} AUTO 6 ${enabled ? 'ON' : 'OFF'}`, { show_alert: true });
+      return showDicePanel(ctx, config);
+    }
+    device.autoSixColours = disableAutoSixColour(device.autoSixColours, colour);
+    await device.save();
     await Command.create({ deviceId: device.deviceId, telegramId: String(ctx.from.id), colour, dice, expiresAt: new Date(Date.now() + config.commandTtlMinutes * 60000) });
-    await audit(ctx.from.id, 'colour_dice_queued', device.deviceId, { colour, dice });
-    return ctx.answerCbQuery(`${COLOUR_META[colour].emoji} ${colour.toUpperCase()} dice ${dice} queued`);
+    await audit(ctx.from.id, 'colour_dice_queued', device.deviceId, { colour, dice, autoSixDisabled: true });
+    return ctx.answerCbQuery(`${COLOUR_META[colour].emoji} ${colour.toUpperCase()} dice ${dice} queued once`);
   });
 
   async function adminOnly(ctx) {
@@ -326,6 +344,7 @@ function createBot(config) {
     device.authorized = false;
     device.linkedTelegramId = telegramId;
     device.controllerTelegramIds = [];
+    device.autoSixColours = [];
     device.activationKeyHash = hashSecret(activationKey);
     device.activationKeyPreview = `••••${activationKey.slice(-6)}`;
     device.keyIssuedToTelegramId = telegramId;
@@ -345,7 +364,7 @@ function createBot(config) {
     const [, telegramId, deviceId] = ctx.match;
     const device = await Device.findOne({ deviceId });
     if (device) {
-      device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = [];
+      device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = []; device.autoSixColours = [];
       device.activationKeyHash = ''; device.activationKeyPreview = '';
       device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
       await device.save();
@@ -365,7 +384,7 @@ function createBot(config) {
     const affectedTelegramIds = [...new Set([
       ...(device.controllerTelegramIds || []), device.linkedTelegramId, device.keyIssuedToTelegramId,
     ].filter(Boolean).map(String))];
-    device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = [];
+    device.authorized = false; device.linkedTelegramId = ''; device.controllerTelegramIds = []; device.autoSixColours = [];
     device.activationKeyHash = ''; device.activationKeyPreview = '';
     device.keyCreatedAt = null; device.keyActivatedAt = null; device.keyRevokedAt = new Date();
     await device.save();
@@ -505,7 +524,7 @@ function createBot(config) {
       }
       if (isValidDeviceId(value)) {
         const device = await Device.findOne({ deviceId: value }); if (!device) return ctx.reply('Device not found.', adminKeyboard());
-        device.authorized=false; device.linkedTelegramId=''; device.controllerTelegramIds=[];
+        device.authorized=false; device.linkedTelegramId=''; device.controllerTelegramIds=[]; device.autoSixColours=[];
         device.activationKeyHash=''; device.activationKeyPreview=''; device.keyRevokedAt=new Date();
         await device.save(); await Command.deleteMany({ deviceId:value });
         await User.updateMany({ deviceIds:value }, { $pull:{deviceIds:value} });

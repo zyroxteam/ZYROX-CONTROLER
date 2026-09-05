@@ -17,6 +17,7 @@ const deviceSchema = new mongoose.Schema({
   secretHash: { type: String, required: true },
   linkedTelegramId: { type: String, default: '', index: true },
   controllerTelegramIds: [{ type: String }],
+  autoSixColours: [{ type: String, enum: ['red', 'green', 'blue', 'yellow'] }],
   authorized: { type: Boolean, default: false, index: true },
   activationKeyHash: { type: String, default: '', index: true },
   activationKeyPreview: { type: String, default: '' },

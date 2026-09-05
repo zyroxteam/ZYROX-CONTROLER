@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -41,6 +42,7 @@ public final class ControlClient {
     private final Handler mainHandler=new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService executor=Executors.newScheduledThreadPool(2);
     private final ConcurrentHashMap<String, AtomicInteger> pending=new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> autoSix=new ConcurrentHashMap<>();
     private final String deviceId, deviceSecret;
     private volatile boolean registered, authorized, linked, maintenance;
     private volatile String lastMessage="Connecting", botLink="", activationOwner="@ZB_EXPLOIT";
@@ -51,7 +53,7 @@ public final class ControlClient {
         preferences=appContext.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         deviceId=getOrCreateDeviceId(); deviceSecret=getOrCreateSecret();
         botLink="https://t.me/ZyroxLudoKingbot?start="+deviceId;
-        for(String c:new String[]{"red","green","blue","yellow"}) pending.put(c,new AtomicInteger(0));
+        for(String c:new String[]{"red","green","blue","yellow"}) { pending.put(c,new AtomicInteger(0)); autoSix.put(c,new AtomicInteger(0)); }
     }
     public static ControlClient get(Context context) {
         if(instance==null) synchronized(ControlClient.class){ if(instance==null) instance=new ControlClient(context); }
@@ -65,7 +67,11 @@ public final class ControlClient {
     public String getLastMessage(){return lastMessage;}
     public String getActivationOwner(){return activationOwner;}
     public String getBotLink(){return botLink;}
-    public int takePendingDice(String colour){ AtomicInteger value=pending.get(normalizeColour(colour)); return value==null?0:value.getAndSet(0); }
+    public int takePendingDice(String colour){
+        String normalized=normalizeColour(colour); AtomicInteger value=pending.get(normalized); int oneTime=value==null?0:value.getAndSet(0);
+        AtomicInteger automatic=autoSix.get(normalized); return resolveDice(oneTime,automatic!=null&&automatic.get()==1);
+    }
+    static int resolveDice(int oneTime,boolean autoSixEnabled){if(oneTime>=1&&oneTime<=6)return oneTime;return autoSixEnabled?6:0;}
 
     public void setServerUrl(String input){
         String value=normalizeServerUrl(input); if(value.isEmpty()) value=DEFAULT_SERVER;
@@ -101,7 +107,7 @@ public final class ControlClient {
         try{
             if(!registered){registerBlocking(); return;}
             JSONObject response=request("GET","/api/v1/devices/"+deviceId+"/next-command",null,true);
-            updateState(response);
+            updateState(response); updateAutoSix(response);
             JSONObject command=response.optJSONObject("command");
             if(command!=null){
                 String colour=normalizeColour(command.optString("colour","")); int dice=command.optInt("dice",0);
@@ -139,6 +145,11 @@ public final class ControlClient {
         String link=response.optString("botLink",""); if(!link.isEmpty())botLink=link;
         String owner=response.optString("activationOwner",""); if(!owner.isEmpty())activationOwner=owner;
     }
+    private void updateAutoSix(JSONObject response){
+        JSONArray colours=response.optJSONArray("autoSixColours"); if(colours==null)return;
+        for(AtomicInteger value:autoSix.values())value.set(0);
+        for(int i=0;i<colours.length();i++){AtomicInteger value=autoSix.get(normalizeColour(colours.optString(i,"")));if(value!=null)value.set(1);}
+    }
     private JSONObject request(String method,String path,JSONObject body,boolean authenticate)throws Exception{
         HttpURLConnection connection=(HttpURLConnection)new URL(getServerUrl()+path).openConnection();
         connection.setRequestMethod(method); connection.setConnectTimeout(5000); connection.setReadTimeout(5000); connection.setUseCaches(false);
@@ -150,7 +161,7 @@ public final class ControlClient {
     }
     private static String readAll(InputStream stream)throws Exception{if(stream==null)return"";StringBuilder r=new StringBuilder();try(BufferedReader reader=new BufferedReader(new InputStreamReader(stream,StandardCharsets.UTF_8))){String line;while((line=reader.readLine())!=null)r.append(line);}return r.toString();}
     private void post(Callback callback,Result result){if(callback!=null)mainHandler.post(()->callback.onResult(result));}
-    private void clearPending(){for(AtomicInteger value:pending.values())value.set(0);}
+    private void clearPending(){for(AtomicInteger value:pending.values())value.set(0);for(AtomicInteger value:autoSix.values())value.set(0);}
     private String getOrCreateDeviceId(){
         String saved=preferences.getString(PREF_DEVICE_ID,"");if(saved.matches("^ZRX-[A-Z0-9]{12}$"))return saved;
         char[] alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789".toCharArray();SecureRandom random=new SecureRandom();StringBuilder id=new StringBuilder("ZRX-");for(int i=0;i<12;i++)id.append(alphabet[random.nextInt(alphabet.length)]);

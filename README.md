@@ -16,11 +16,11 @@ The Telegram user chooses a player colour first and then the next dice value:
 ```text
 [ 🔴 RED   ] [ 🟢 GREEN  ]
 [ 🔵 BLUE  ] [ 🟡 YELLOW ]
-[ 🎲 6 ] [ 🎲 5 ] [ 🎲 4 ]
+[ ♾ 6 AUTO ] [ 🎲 5 ] [ 🎲 4 ]
 [ 🎲 3 ] [ 🎲 2 ] [ 🎲 1 ]
 ```
 
-A command only applies when the selected colour's next turn is rolled. Other colours continue rolling normally.
+For `5 4 3 2 1`, a command applies only to the selected colour's next roll. The `6` button is a colour-specific **AUTO 6** toggle: press it once and every future roll for that colour is 6; press 6 again to turn it off. Pressing `5/4/3/2/1` also turns AUTO 6 off for that colour and queues that value once. Other colours continue rolling normally.
 
 ## Device-bound activation-key flow
 
